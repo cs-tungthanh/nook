@@ -2,6 +2,73 @@ import SwiftUI
 import AppKit
 import UserNotifications
 
+// MARK: - Constants
+
+private enum Constants {
+    enum UI {
+        static let statusBarWidth: CGFloat = 70
+        static let popoverWidth: CGFloat = 320
+        static let popoverHeight: CGFloat = 380
+        static let contentHeight: CGFloat = 270
+    }
+
+    enum Highlight {
+        static let fixedWidth: CGFloat = 64
+        static let fixedHeight: CGFloat = 18
+        static let cornerRadius: CGFloat = 5
+        static let borderWidth: CGFloat = 0.5
+        static let darkModeBackgroundAlpha: CGFloat = 0.08
+        static let darkModeBorderAlpha: CGFloat = 0.15
+        static let lightModeBackgroundAlpha: CGFloat = 0.06
+        static let lightModeBorderAlpha: CGFloat = 0.12
+    }
+
+    enum Time {
+        static let secondsPerMinute = 60
+        static let secondsPerHour = 3600
+        static let updateInterval: TimeInterval = 1.0
+    }
+
+    enum Default {
+        static let customMinutes = "20"
+    }
+}
+
+// MARK: - Time Formatting Helper
+
+private struct TimeRemaining {
+    let hours: Int
+    let minutes: Int
+    let seconds: Int
+
+    init(from timeInterval: TimeInterval) {
+        let totalSeconds = Int(timeInterval)
+        hours = totalSeconds / Constants.Time.secondsPerHour
+        minutes = (totalSeconds % Constants.Time.secondsPerHour) / Constants.Time.secondsPerMinute
+        seconds = totalSeconds % Constants.Time.secondsPerMinute
+    }
+
+    var shortFormat: String {
+        if hours > 0 {
+            return "\(hours)h\(minutes)m"
+        } else {
+            return "\(minutes)m"
+        }
+    }
+
+    var longFormat: String {
+        if hours > 0 {
+            return String(format: "%dh %dm %ds", hours, minutes, seconds)
+        } else if minutes > 0 {
+            return String(format: "%dm %ds", minutes, seconds)
+        } else {
+            return String(format: "%ds", seconds)
+        }
+    }
+}
+
+// MARK: - App Entry Point
+
 @main
 struct PowerOffTimerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -13,6 +80,8 @@ struct PowerOffTimerApp: App {
     }
 }
 
+// MARK: - App Delegate
+
 class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
@@ -22,21 +91,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var highlightView: NSView?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Request notification permissions
+        requestNotificationPermissions()
+        setupStatusBar()
+        setupPopover()
+    }
+
+    private func requestNotificationPermissions() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
 
-        // Create the status item with fixed width to prevent position shifts
-        statusItem = NSStatusBar.system.statusItem(withLength: 70)
+    private func setupStatusBar() {
+        statusItem = NSStatusBar.system.statusItem(withLength: Constants.UI.statusBarWidth)
 
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "power", accessibilityDescription: "Power Off Timer")
-            button.action = #selector(togglePopover)
-            button.target = self
-        }
+        guard let button = statusItem.button else { return }
+        button.image = NSImage(systemSymbolName: "power", accessibilityDescription: "Power Off Timer")
+        button.action = #selector(togglePopover)
+        button.target = self
+    }
 
-        // Create the popover
+    private func setupPopover() {
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 320, height: 380)
+        popover.contentSize = NSSize(width: Constants.UI.popoverWidth, height: Constants.UI.popoverHeight)
         popover.behavior = .transient
         popover.delegate = self
         popover.contentViewController = NSHostingController(rootView: ContentView(appDelegate: self))
@@ -54,75 +129,71 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    func addHighlight() {
+    private func addHighlight() {
         guard let button = statusItem.button else { return }
-
-        // Remove existing highlight if any
         removeHighlight()
 
-        // Create a subtle background view that matches native macOS style
-        // Use full bounds with smaller insets to accommodate text
-        let highlight = NSView(frame: button.bounds.insetBy(dx: 3, dy: 3))
+        // Use fixed size and center within button
+        let width = Constants.Highlight.fixedWidth
+        let height = Constants.Highlight.fixedHeight
+        let x = (button.bounds.width - width) / 2
+        let y = (button.bounds.height - height) / 2
+
+        let highlight = NSView(frame: NSRect(x: x, y: y, width: width, height: height))
         highlight.wantsLayer = true
 
-        if let layer = highlight.layer {
-            // Use a subtle white/black overlay depending on appearance
-            if NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-                // Dark mode: subtle white overlay with border
-                layer.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-                layer.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
-            } else {
-                // Light mode: subtle black overlay with border
-                layer.backgroundColor = NSColor.black.withAlphaComponent(0.06).cgColor
-                layer.borderColor = NSColor.black.withAlphaComponent(0.12).cgColor
-            }
-            layer.cornerRadius = 5
-            layer.borderWidth = 0.5
-        }
+        configureHighlightLayer(highlight.layer)
 
-        // Make it resize with the button
-        highlight.autoresizingMask = [.width, .height]
-
-        // Insert at the very back
         button.addSubview(highlight, positioned: .below, relativeTo: button.subviews.first)
         highlightView = highlight
-
-        // Force layout update
         button.layoutSubtreeIfNeeded()
     }
 
-    func removeHighlight() {
+    private func configureHighlightLayer(_ layer: CALayer?) {
+        guard let layer = layer else { return }
+
+        let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let backgroundColor = isDarkMode
+            ? NSColor.white.withAlphaComponent(Constants.Highlight.darkModeBackgroundAlpha)
+            : NSColor.black.withAlphaComponent(Constants.Highlight.lightModeBackgroundAlpha)
+        let borderColor = isDarkMode
+            ? NSColor.white.withAlphaComponent(Constants.Highlight.darkModeBorderAlpha)
+            : NSColor.black.withAlphaComponent(Constants.Highlight.lightModeBorderAlpha)
+
+        layer.backgroundColor = backgroundColor.cgColor
+        layer.borderColor = borderColor.cgColor
+        layer.cornerRadius = Constants.Highlight.cornerRadius
+        layer.borderWidth = Constants.Highlight.borderWidth
+    }
+
+    private func removeHighlight() {
         highlightView?.removeFromSuperview()
         highlightView = nil
     }
 
     func scheduleShutdown(at date: Date) {
         shutdownDate = date
+        cancelExistingTimers()
+        startShutdownTimer(for: date)
+        startUIUpdateTimer()
+        updateStatusItem()
+        showNotification(title: "Shutdown Scheduled", body: "Your Mac will shut down at \(formatDate(date))")
+    }
 
-        // Cancel existing timer
+    private func cancelExistingTimers() {
         timer?.invalidate()
+        updateTimer?.invalidate()
+    }
 
-        // Schedule new timer
+    private func startShutdownTimer(for date: Date) {
         timer = Timer(fireAt: date, interval: 0, target: self, selector: #selector(executeShutdown), userInfo: nil, repeats: false)
         RunLoop.main.add(timer!, forMode: .common)
+    }
 
-        // Start UI update timer for countdown
-        updateTimer?.invalidate()
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+    private func startUIUpdateTimer() {
+        updateTimer = Timer.scheduledTimer(withTimeInterval: Constants.Time.updateInterval, repeats: true) { [weak self] _ in
             self?.objectWillChange.send()
         }
-
-        // Update status item
-        updateStatusItem()
-
-        // Show notification
-        let content = UNMutableNotificationContent()
-        content.title = "Shutdown Scheduled"
-        content.body = "Your Mac will shut down at \(formatDate(date))"
-        content.sound = .default
-
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
     }
 
     func cancelShutdown() {
@@ -133,15 +204,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             self?.updateTimer = nil
             self?.shutdownDate = nil
             self?.updateStatusItem()
-
-            let content = UNMutableNotificationContent()
-            content.title = "Shutdown Cancelled"
-            content.body = "The scheduled shutdown has been cancelled"
-            content.sound = .default
-
-            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-            UNUserNotificationCenter.current().add(request)
+            self?.showNotification(title: "Shutdown Cancelled", body: "The scheduled shutdown has been cancelled")
         }
+    }
+
+    private func showNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     @objc func executeShutdown() {
@@ -179,18 +253,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         guard let shutdownDate = shutdownDate else { return "" }
         let remaining = shutdownDate.timeIntervalSinceNow
 
-        if remaining <= 0 {
-            return "Now"
-        }
+        guard remaining > 0 else { return "Now" }
+        return TimeRemaining(from: remaining).shortFormat
+    }
 
-        let hours = Int(remaining) / 3600
-        let minutes = (Int(remaining) % 3600) / 60
+    func getTimeRemaining() -> String? {
+        guard let shutdownDate = shutdownDate else { return nil }
+        let remaining = shutdownDate.timeIntervalSinceNow
 
-        if hours > 0 {
-            return "\(hours)h\(minutes)m"
-        } else {
-            return "\(minutes)m"
-        }
+        guard remaining > 0 else { return "Shutting down..." }
+        return TimeRemaining(from: remaining).longFormat
     }
 
     func formatDate(_ date: Date) -> String {
@@ -199,79 +271,69 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         formatter.dateStyle = .none
         return formatter.string(from: date)
     }
-
-    func getTimeRemaining() -> String? {
-        guard let shutdownDate = shutdownDate else { return nil }
-        let remaining = shutdownDate.timeIntervalSinceNow
-
-        if remaining <= 0 {
-            return "Shutting down..."
-        }
-
-        let hours = Int(remaining) / 3600
-        let minutes = (Int(remaining) % 3600) / 60
-        let seconds = Int(remaining) % 60
-
-        if hours > 0 {
-            return String(format: "%dh %dm %ds", hours, minutes, seconds)
-        } else if minutes > 0 {
-            return String(format: "%dm %ds", minutes, seconds)
-        } else {
-            return String(format: "%ds", seconds)
-        }
-    }
 }
 
 // MARK: - NSPopoverDelegate
 extension AppDelegate: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         // Remove highlight when popover closes
-        removeHighlight()
+        DispatchQueue.main.async { [weak self] in
+            self?.removeHighlight()
+        }
     }
 }
 
+// MARK: - Content View
+
 struct ContentView: View {
     @ObservedObject var appDelegate: AppDelegate
-    @State private var customMinutes: String = "20"
+    @State private var customMinutes: String = Constants.Default.customMinutes
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: "power")
-                    .font(.title2)
-                Text("Power Off Timer")
-                    .font(.headline)
-            }
-            .padding()
-            .frame(maxWidth: .infinity)
-            .background(Color.accentColor.opacity(0.1))
-
-            // Main content area with consistent frame
-            Group {
-                if appDelegate.shutdownDate != nil {
-                    scheduledView
-                } else {
-                    quickActionsView
-                }
-            }
-            .frame(maxWidth: .infinity, minHeight: 270, maxHeight: 270, alignment: .top)
-
+            headerView
+            contentView
             Divider()
-
-            // Footer
-            Button(action: {
-                NSApplication.shared.terminate(nil)
-            }) {
-                Text("Quit")
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .padding(8)
+            footerView
         }
     }
 
-    var scheduledView: some View {
+    private var headerView: some View {
+        HStack {
+            Image(systemName: "power")
+                .font(.title2)
+            Text("Power Off Timer")
+                .font(.headline)
+        }
+        .padding()
+        .frame(maxWidth: .infinity)
+        .background(Color.accentColor.opacity(0.1))
+    }
+
+    private var contentView: some View {
+        Group {
+            if appDelegate.shutdownDate != nil {
+                scheduledView
+            } else {
+                quickActionsView
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: Constants.UI.contentHeight, maxHeight: Constants.UI.contentHeight, alignment: .top)
+    }
+
+    private var footerView: some View {
+        Button(action: {
+            NSApplication.shared.terminate(nil)
+        }) {
+            Text("Quit")
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(8)
+        }
+        .buttonStyle(CustomPlainButtonStyle())
+    }
+
+    private var scheduledView: some View {
         VStack(spacing: 8) {
             HStack(spacing: 4) {
                 Image(systemName: "circle.fill")
@@ -293,9 +355,11 @@ struct ContentView: View {
                     .foregroundColor(.primary)
             }
 
-            Text("Shutdown at \(appDelegate.formatDate(appDelegate.shutdownDate!))")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+            if let shutdownDate = appDelegate.shutdownDate {
+                Text("Shutdown at \(appDelegate.formatDate(shutdownDate))")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
 
             Button(action: {
                 appDelegate.cancelShutdown()
@@ -325,7 +389,7 @@ struct ContentView: View {
         )
     }
 
-    var quickActionsView: some View {
+    private var quickActionsView: some View {
         VStack(spacing: 12) {
             Text("Quick Actions")
                 .font(.caption)
@@ -333,13 +397,13 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 12) {
-                QuickActionButton(title: "30min", minutes: 30) {
+                QuickActionButton(title: "30min") {
                     scheduleQuickShutdown(minutes: 30)
                 }
-                QuickActionButton(title: "40min", minutes: 40) {
+                QuickActionButton(title: "40min") {
                     scheduleQuickShutdown(minutes: 40)
                 }
-                QuickActionButton(title: "1h", minutes: 60) {
+                QuickActionButton(title: "1h") {
                     scheduleQuickShutdown(minutes: 60)
                 }
             }
@@ -422,8 +486,8 @@ struct ContentView: View {
         .background(Color.accentColor.opacity(0.05))
     }
 
-    func scheduleQuickShutdown(minutes: Int) {
-        let shutdownDate = Date().addingTimeInterval(TimeInterval(minutes * 60))
+    private func scheduleQuickShutdown(minutes: Int) {
+        let shutdownDate = Date().addingTimeInterval(TimeInterval(minutes * Constants.Time.secondsPerMinute))
         appDelegate.scheduleShutdown(at: shutdownDate)
     }
 }
@@ -485,15 +549,13 @@ struct IconButtonStyle: ButtonStyle {
     }
 }
 
-struct PlainButtonStyle: ButtonStyle {
+struct CustomPlainButtonStyle: ButtonStyle {
     @State private var isHovered = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.secondary.opacity(isHovered ? 0.1 : 0))
-                    .padding(-6)
+                Color.secondary.opacity(isHovered ? 0.1 : 0)
             )
             .animation(.easeInOut(duration: 0.15), value: isHovered)
             .onHover { hovering in
@@ -506,7 +568,6 @@ struct PlainButtonStyle: ButtonStyle {
 
 struct QuickActionButton: View {
     let title: String
-    let minutes: Int
     let action: () -> Void
 
     var body: some View {
