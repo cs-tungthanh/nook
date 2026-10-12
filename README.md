@@ -14,6 +14,11 @@ A native macOS menu bar app to schedule system shutdowns.
   - Icon changes to filled state
 - **Notifications**: Get notified when shutdown is scheduled or cancelled
 - **Easy cancellation**: Cancel scheduled shutdowns with one click
+- **Break reminders**: Get reminded to relax every N minutes (default 20)
+  - Choose the break length: 10m, 30m, 1h or 2h
+  - Two styles: a **Notification** with Start break / Snooze / Skip actions, or a **Full screen** blurred overlay with a countdown (Esc to skip; the screen is never locked)
+  - Shows a ☕ countdown in the menu bar during a break
+  - Pauses while your Mac is locked or asleep, and settings are remembered between launches
 
 ## Building the App
 
