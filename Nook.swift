@@ -7,16 +7,14 @@ import UserNotifications
 private enum Constants {
     enum UI {
         static let popoverWidth: CGFloat = 320
-        static let contentHeight: CGFloat = 270
     }
 
     enum Break {
         static let defaultIntervalMinutes = 20
-        static let defaultDurationSeconds = 600
-        static let durationOptions = [600, 1800, 3600, 7200]
+        static let defaultDurationSeconds = 120
+        static let durationOptions = [120, 300, 600, 1200]
         static let minIntervalMinutes = 1
         static let maxIntervalMinutes = 180
-        static let intervalStep = 5
         static let snoozeMinutes = 5
         static let notificationID = "break-reminder"
         static let categoryID = "BREAK_REMINDER"
@@ -36,7 +34,7 @@ private enum Constants {
     }
 
     enum Highlight {
-        static let fixedHeight: CGFloat = 18
+        static let fixedHeight: CGFloat = 24
         static let cornerRadius: CGFloat = 5
         static let borderWidth: CGFloat = 0.5
         static let darkModeBackgroundAlpha: CGFloat = 0.08
@@ -51,8 +49,15 @@ private enum Constants {
         static let updateInterval: TimeInterval = 1.0
     }
 
-    enum Default {
-        static let customMinutes = "20"
+    enum Shutdown {
+        static let defaultMinutes = 30
+        static let presetMinutes = [30, 40, 60]
+        static let minMinutes = 1
+        static let maxMinutes = 600
+    }
+
+    enum Stepper {
+        static let step = 5
     }
 }
 
@@ -169,7 +174,7 @@ final class BreakReminder: ObservableObject {
         didSet { defaults.set(mode.rawValue, forKey: Constants.Break.Keys.mode) }
     }
 
-    /// Called on every tick and phase change so the menu bar can refresh.
+    /// Called on every phase change so the menu bar can refresh.
     var onChange: (() -> Void)?
 
     private let defaults = UserDefaults.standard
@@ -279,8 +284,6 @@ final class BreakReminder: ObservableObject {
         default:
             break
         }
-        objectWillChange.send()
-        onChange?()
     }
 
     private func breakDue() {
@@ -415,6 +418,29 @@ private enum NookGlyph {
     }()
 }
 
+/// Status icons drawn on the same 18×18 canvas as `NookGlyph`, so swapping
+/// icons never changes the menu bar button's size.
+private enum StatusIcon {
+    static let onBreak = symbol("cup.and.saucer.fill", description: "On Break")
+    static let shutdown = symbol("power.circle.fill", description: "Shutdown Scheduled")
+
+    private static func symbol(_ name: String, description: String) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: description)?
+            .withSymbolConfiguration(config) else { return nil }
+
+        let image = NSImage(size: NookGlyph.image.size, flipped: false) { rect in
+            let size = symbol.size
+            symbol.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2,
+                                   width: size.width, height: size.height))
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = description
+        return image
+    }
+}
+
 // MARK: - App Entry Point
 
 @main
@@ -435,7 +461,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var popover: NSPopover!
     var timer: Timer?
     @Published var shutdownDate: Date?
-    var updateTimer: Timer?
     var highlightView: NSView?
     let breakReminder = BreakReminder()
 
@@ -478,6 +503,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let hostingController = NSHostingController(rootView: ContentView(appDelegate: self, breakReminder: breakReminder))
         hostingController.sizingOptions = .preferredContentSize
         popover.contentViewController = hostingController
+        // Build and lay out the SwiftUI tree now so the first click doesn't pay for it
+        _ = hostingController.view.fittingSize
     }
 
     @objc func togglePopover() {
@@ -498,12 +525,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         // Span the button's width so the highlight matches the icon-only item
         let width = button.bounds.width
-        let height = Constants.Highlight.fixedHeight
+        let height = min(Constants.Highlight.fixedHeight, button.bounds.height)
         let x = (button.bounds.width - width) / 2
         let y = (button.bounds.height - height) / 2
 
         let highlight = NSView(frame: NSRect(x: x, y: y, width: width, height: height))
         highlight.wantsLayer = true
+        // Follow the button if its size changes while the popover is open
+        highlight.autoresizingMask = [.width, .minYMargin, .maxYMargin]
 
         configureHighlightLayer(highlight.layer)
 
@@ -538,14 +567,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         shutdownDate = date
         cancelExistingTimers()
         startShutdownTimer(for: date)
-        startUIUpdateTimer()
         updateStatusItem()
         showNotification(title: "Shutdown Scheduled", body: "Your Mac will shut down at \(formatDate(date))")
     }
 
     private func cancelExistingTimers() {
         timer?.invalidate()
-        updateTimer?.invalidate()
     }
 
     private func startShutdownTimer(for date: Date) {
@@ -553,19 +580,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         RunLoop.main.add(timer!, forMode: .common)
     }
 
-    private func startUIUpdateTimer() {
-        updateTimer = Timer.scheduledTimer(withTimeInterval: Constants.Time.updateInterval, repeats: true) { [weak self] _ in
-            self?.objectWillChange.send()
-            self?.updateStatusItem()
-        }
-    }
-
     func cancelShutdown() {
         DispatchQueue.main.async { [weak self] in
             self?.timer?.invalidate()
             self?.timer = nil
-            self?.updateTimer?.invalidate()
-            self?.updateTimer = nil
             self?.shutdownDate = nil
             self?.updateStatusItem()
             self?.showNotification(title: "Shutdown Cancelled", body: "The scheduled shutdown has been cancelled")
@@ -596,31 +614,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func updateStatusItem() {
         // Icon only, so the item stays the same size as other menu bar icons;
         // the countdowns live in the popover
-        if let button = statusItem.button {
-            if breakReminder.breakTimeRemaining != nil {
-                // Break state takes priority while a break is running
-                button.image = NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: "On Break")
-            } else if shutdownDate != nil {
-                button.image = NSImage(systemSymbolName: "power.circle.fill", accessibilityDescription: "Shutdown Scheduled")
-            } else {
-                button.image = NookGlyph.image
-            }
+        guard let button = statusItem.button else { return }
+        let image: NSImage?
+        if breakReminder.breakTimeRemaining != nil {
+            // Break state takes priority while a break is running
+            image = StatusIcon.onBreak
+        } else if shutdownDate != nil {
+            image = StatusIcon.shutdown
+        } else {
+            image = NookGlyph.image
+        }
+        if button.image !== image {
+            button.image = image
         }
     }
 
-    func getTimeRemaining() -> String? {
-        guard let shutdownDate = shutdownDate else { return nil }
-        let remaining = shutdownDate.timeIntervalSinceNow
-
-        guard remaining > 0 else { return "Shutting down..." }
-        return TimeRemaining(from: remaining).longFormat
-    }
-
-    func formatDate(_ date: Date) -> String {
+    private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         formatter.dateStyle = .none
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    func formatDate(_ date: Date) -> String {
+        Self.timeFormatter.string(from: date)
     }
 }
 
@@ -664,12 +681,12 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
 struct ContentView: View {
     @ObservedObject var appDelegate: AppDelegate
     @ObservedObject var breakReminder: BreakReminder
-    @State private var customMinutes: String = Constants.Default.customMinutes
+    @State private var shutdownMinutes = Constants.Shutdown.defaultMinutes
 
     var body: some View {
         VStack(spacing: 0) {
             headerView
-            contentView
+            powerOffView
             Divider()
             breakReminderView
             Divider()
@@ -692,17 +709,6 @@ struct ContentView: View {
         .background(Color.accentColor.opacity(0.1))
     }
 
-    private var contentView: some View {
-        Group {
-            if appDelegate.shutdownDate != nil {
-                scheduledView
-            } else {
-                quickActionsView
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: Constants.UI.contentHeight, maxHeight: Constants.UI.contentHeight, alignment: .top)
-    }
-
     private var footerView: some View {
         Button(action: {
             NSApplication.shared.terminate(nil)
@@ -715,157 +721,55 @@ struct ContentView: View {
         .buttonStyle(CustomPlainButtonStyle())
     }
 
-    private var scheduledView: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 4) {
-                Image(systemName: "circle.fill")
-                    .font(.system(size: 8))
-                    .foregroundColor(.red)
-                Text("SHUTDOWN SCHEDULED")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundColor(.red)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color.red.opacity(0.15))
-            .cornerRadius(12)
+    // MARK: Power Off
 
-            if let timeRemaining = appDelegate.getTimeRemaining() {
-                Text(timeRemaining)
-                    .font(.system(.title, design: .monospaced))
-                    .fontWeight(.bold)
-                    .foregroundColor(.primary)
-            }
+    private var powerOffView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionLabel("Power Off", systemImage: "power")
+                .frame(minHeight: 20)
 
             if let shutdownDate = appDelegate.shutdownDate {
-                Text("Shutdown at \(appDelegate.formatDate(shutdownDate))")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-
-            Button(action: {
-                appDelegate.cancelShutdown()
-            }) {
-                HStack {
-                    Image(systemName: "xmark.circle.fill")
-                    Text("Cancel Shutdown")
-                        .fontWeight(.semibold)
+                TimelineView(.periodic(from: .now, by: Constants.Time.updateInterval)) { _ in
+                    statusRow(
+                        icon: "power.circle.fill",
+                        text: shutdownCountdownText(until: shutdownDate),
+                        actionTitle: "Cancel",
+                        action: appDelegate.cancelShutdown
+                    )
                 }
-                .foregroundColor(.white)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color.red)
-                .cornerRadius(8)
+            } else {
+                settingRow("After") {
+                    minuteStepper($shutdownMinutes, in: Constants.Shutdown.minMinutes...Constants.Shutdown.maxMinutes)
+                }
+
+                settingRow("Quick") {
+                    Picker("", selection: $shutdownMinutes) {
+                        ForEach(Constants.Shutdown.presetMinutes, id: \.self) { minutes in
+                            Text(shortDurationText(minutes * Constants.Time.secondsPerMinute)).tag(minutes)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+
+                TimelineView(.periodic(from: .now, by: Constants.Time.updateInterval)) { _ in
+                    statusRow(
+                        icon: "clock",
+                        text: "Shuts down at \(appDelegate.formatDate(Date().addingTimeInterval(TimeInterval(shutdownMinutes * Constants.Time.secondsPerMinute))))",
+                        actionTitle: "Start",
+                        action: { scheduleShutdown(minutes: shutdownMinutes) }
+                    )
+                }
             }
-            .buttonStyle(DangerButtonStyle())
-            .padding(.top, 8)
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            LinearGradient(
-                gradient: Gradient(colors: [Color.orange.opacity(0.15), Color.red.opacity(0.1)]),
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+        .padding(.horizontal)
+        .padding(.vertical, 12)
     }
 
-    private var quickActionsView: some View {
-        VStack(spacing: 12) {
-            Text("Power Off")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 12) {
-                QuickActionButton(title: "30min") {
-                    scheduleQuickShutdown(minutes: 30)
-                }
-                QuickActionButton(title: "40min") {
-                    scheduleQuickShutdown(minutes: 40)
-                }
-                QuickActionButton(title: "1h") {
-                    scheduleQuickShutdown(minutes: 60)
-                }
-            }
-
-            Divider()
-                .padding(.vertical, 4)
-
-            Text("Custom")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 8) {
-                // Decrement button
-                Button(action: {
-                    if let current = Int(customMinutes), current > 1 {
-                        customMinutes = String(current - 1)
-                    }
-                }) {
-                    Image(systemName: "minus.circle.fill")
-                        .font(.title)
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(IconButtonStyle())
-
-                // Minutes display
-                VStack(spacing: 2) {
-                    TextField("", text: $customMinutes)
-                        .textFieldStyle(.plain)
-                        .multilineTextAlignment(.center)
-                        .frame(width: 50)
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-
-                    Text("minutes")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-
-                // Increment button
-                Button(action: {
-                    if let current = Int(customMinutes) {
-                        customMinutes = String(current + 1)
-                    }
-                }) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title)
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(IconButtonStyle())
-            }
-
-            // Big trigger button
-            Button(action: {
-                if let minutes = Int(customMinutes), minutes > 0 {
-                    scheduleQuickShutdown(minutes: minutes)
-                }
-            }) {
-                HStack {
-                    Image(systemName: "power")
-                    Text("Start Shutdown Timer")
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(
-                    LinearGradient(
-                        gradient: Gradient(colors: [Color.accentColor.opacity(0.8), Color.accentColor]),
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .foregroundColor(.white)
-                .cornerRadius(10)
-            }
-            .buttonStyle(PrimaryButtonStyle())
-            .padding(.bottom, 8)
-        }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color.accentColor.opacity(0.05))
+    private func shutdownCountdownText(until date: Date) -> String {
+        let remaining = date.timeIntervalSinceNow
+        guard remaining > 0 else { return "Shutting down…" }
+        return "Shutting down in \(TimeRemaining(from: remaining).longFormat)"
     }
 
     // MARK: Break Reminder
@@ -873,40 +777,17 @@ struct ContentView: View {
     private var breakReminderView: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle(isOn: $breakReminder.isEnabled) {
-                HStack(spacing: 6) {
-                    Image(systemName: "cup.and.saucer.fill")
-                        .foregroundColor(.accentColor)
-                    Text("Break Reminders")
-                        .font(.system(size: 13, weight: .semibold))
-                }
+                sectionLabel("Break Reminders", systemImage: "cup.and.saucer.fill")
             }
             .toggleStyle(.switch)
             .controlSize(.small)
 
             if breakReminder.isEnabled {
-                breakSettingRow("Every") {
-                    Button(action: decrementInterval) {
-                        Image(systemName: "minus.circle.fill")
-                            .font(.title3)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(IconButtonStyle())
-
-                    Text("\(breakReminder.intervalMinutes) min")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .frame(minWidth: 60)
-
-                    Button(action: incrementInterval) {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.title3)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(IconButtonStyle())
-
-                    Spacer()
+                settingRow("Every") {
+                    minuteStepper($breakReminder.intervalMinutes, in: Constants.Break.minIntervalMinutes...Constants.Break.maxIntervalMinutes)
                 }
 
-                breakSettingRow("Relax") {
+                settingRow("Relax") {
                     Picker("", selection: $breakReminder.durationSeconds) {
                         ForEach(Constants.Break.durationOptions, id: \.self) { seconds in
                             Text(shortDurationText(seconds)).tag(seconds)
@@ -916,7 +797,7 @@ struct ContentView: View {
                     .labelsHidden()
                 }
 
-                breakSettingRow("Style") {
+                settingRow("Style") {
                     Picker("", selection: $breakReminder.mode) {
                         ForEach(BreakMode.allCases) { mode in
                             Text(mode.title).tag(mode)
@@ -926,14 +807,52 @@ struct ContentView: View {
                     .labelsHidden()
                 }
 
-                breakStatusView
+                // Only the countdown row redraws each second, not the whole popover
+                TimelineView(.periodic(from: .now, by: Constants.Time.updateInterval)) { _ in
+                    breakStatusView
+                }
             }
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
     }
 
-    private func breakSettingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+    @ViewBuilder
+    private var breakStatusView: some View {
+        switch breakReminder.phase {
+        case .working(let nextBreak):
+            statusRow(
+                icon: "timer",
+                text: "Next break in \(TimeRemaining(from: max(0, nextBreak.timeIntervalSinceNow)).longFormat)",
+                actionTitle: "Break now",
+                action: breakReminder.startBreak
+            )
+        case .onBreak:
+            statusRow(
+                icon: "cup.and.saucer.fill",
+                text: "On break · \(TimeRemaining(from: breakReminder.breakTimeRemaining ?? 0).clockFormat) left",
+                actionTitle: "End break",
+                action: breakReminder.skipBreak
+            )
+        case .paused:
+            statusRow(icon: "pause.circle", text: "Paused while your Mac is locked or asleep")
+        case .off:
+            EmptyView()
+        }
+    }
+
+    // MARK: Shared Rows
+
+    private func sectionLabel(_ title: String, systemImage: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundColor(.accentColor)
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+        }
+    }
+
+    private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .font(.caption)
@@ -943,31 +862,39 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
-    private var breakStatusView: some View {
-        switch breakReminder.phase {
-        case .working(let nextBreak):
-            breakStatusRow(
-                icon: "timer",
-                text: "Next break in \(TimeRemaining(from: max(0, nextBreak.timeIntervalSinceNow)).longFormat)",
-                actionTitle: "Break now",
-                action: breakReminder.startBreak
-            )
-        case .onBreak:
-            breakStatusRow(
-                icon: "cup.and.saucer.fill",
-                text: "On break · \(TimeRemaining(from: breakReminder.breakTimeRemaining ?? 0).clockFormat) left",
-                actionTitle: "End break",
-                action: breakReminder.skipBreak
-            )
-        case .paused:
-            breakStatusRow(icon: "pause.circle", text: "Paused while your Mac is locked or asleep")
-        case .off:
-            EmptyView()
+    /// Steps by 1 below `Constants.Stepper.step` minutes and by that step above it.
+    private func minuteStepper(_ value: Binding<Int>, in range: ClosedRange<Int>) -> some View {
+        let step = Constants.Stepper.step
+        return Group {
+            Button(action: {
+                let current = value.wrappedValue
+                value.wrappedValue = max(range.lowerBound, current - (current > step ? step : 1))
+            }) {
+                Image(systemName: "minus.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(IconButtonStyle())
+
+            Text("\(value.wrappedValue) min")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .frame(minWidth: 60)
+
+            Button(action: {
+                let current = value.wrappedValue
+                value.wrappedValue = min(range.upperBound, current + (current >= step ? step : 1))
+            }) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(IconButtonStyle())
+
+            Spacer()
         }
     }
 
-    private func breakStatusRow(icon: String, text: String, actionTitle: String? = nil, action: (() -> Void)? = nil) -> some View {
+    private func statusRow(icon: String, text: String, actionTitle: String? = nil, action: (() -> Void)? = nil) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
             Text(text)
@@ -1001,19 +928,7 @@ struct ContentView: View {
             : "\(seconds / Constants.Time.secondsPerMinute)m"
     }
 
-    private func decrementInterval() {
-        let current = breakReminder.intervalMinutes
-        let step = current > Constants.Break.intervalStep ? Constants.Break.intervalStep : 1
-        breakReminder.intervalMinutes = max(Constants.Break.minIntervalMinutes, current - step)
-    }
-
-    private func incrementInterval() {
-        let current = breakReminder.intervalMinutes
-        let step = current >= Constants.Break.intervalStep ? Constants.Break.intervalStep : 1
-        breakReminder.intervalMinutes = min(Constants.Break.maxIntervalMinutes, current + step)
-    }
-
-    private func scheduleQuickShutdown(minutes: Int) {
+    private func scheduleShutdown(minutes: Int) {
         let shutdownDate = Date().addingTimeInterval(TimeInterval(minutes * Constants.Time.secondsPerMinute))
         appDelegate.scheduleShutdown(at: shutdownDate)
     }
@@ -1028,24 +943,6 @@ struct PrimaryButtonStyle: ButtonStyle {
         configuration.label
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.white.opacity(isHovered ? 0.15 : 0))
-            )
-            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
-            .animation(.easeInOut(duration: 0.15), value: isHovered)
-            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
-            .onHover { hovering in
-                isHovered = hovering
-            }
-    }
-}
-
-struct DangerButtonStyle: ButtonStyle {
-    @State private var isHovered = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
                     .fill(Color.white.opacity(isHovered ? 0.15 : 0))
             )
             .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
@@ -1113,7 +1010,9 @@ struct BreakOverlayView: View {
                         .foregroundColor(.white.opacity(0.8))
                 }
 
-                countdownRing
+                TimelineView(.periodic(from: .now, by: Constants.Time.updateInterval)) { _ in
+                    countdownRing
+                }
 
                 HStack(spacing: 12) {
                     overlayButton("Snooze \(Constants.Break.snoozeMinutes)m", systemImage: "moon.zzz.fill", action: reminder.snooze)
@@ -1170,32 +1069,4 @@ struct VisualEffectBackground: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
-}
-
-struct QuickActionButton: View {
-    let title: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: "timer")
-                    .font(.title2)
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(
-                LinearGradient(
-                    gradient: Gradient(colors: [Color.accentColor.opacity(0.6), Color.accentColor.opacity(0.8)]),
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .foregroundColor(.white)
-            .cornerRadius(10)
-        }
-        .buttonStyle(PrimaryButtonStyle())
-    }
 }

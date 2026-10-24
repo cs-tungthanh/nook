@@ -11,11 +11,11 @@ Nook is a lightweight macOS app that brings everyday utilities together in one c
 Nook lives in your menu bar. Click the grid icon to open it.
 
 - **Power-off Timer** — Schedule your Mac to shut down after a set time.
-  - One-click presets: 30min, 40min or 1h, or enter any number of minutes.
-  - A live countdown in the menu bar (e.g. `1h30m`) and in the popup.
+  - Pick a preset (30m, 40m or 1h) or step to any number of minutes, then press Start.
+  - A live countdown in the popup, and a power icon in the menu bar while a shutdown is scheduled.
   - Cancel with one click. You get a notification when a shutdown is scheduled or cancelled.
 - **Break Timer** — Remind yourself to take regular breaks and step away from your screen.
-  - A reminder every N minutes (20 by default), with breaks of 10m, 30m, 1h or 2h.
+  - A reminder every N minutes (20 by default), with breaks of 2m, 5m, 10m or 20m.
   - Two styles: a **Notification** with Start break / Snooze / Skip actions, or a **Full screen** blurred overlay with a countdown (press Esc to skip; the screen is never locked).
   - A ☕ countdown in the menu bar during a break.
   - Pauses while your Mac is locked or asleep. Settings are remembered between launches.
