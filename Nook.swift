@@ -6,7 +6,6 @@ import UserNotifications
 
 private enum Constants {
     enum UI {
-        static let statusBarWidth: CGFloat = 70
         static let popoverWidth: CGFloat = 320
         static let contentHeight: CGFloat = 270
     }
@@ -37,7 +36,6 @@ private enum Constants {
     }
 
     enum Highlight {
-        static let fixedWidth: CGFloat = 64
         static let fixedHeight: CGFloat = 18
         static let cornerRadius: CGFloat = 5
         static let borderWidth: CGFloat = 0.5
@@ -70,14 +68,6 @@ private struct TimeRemaining {
         hours = totalSeconds / Constants.Time.secondsPerHour
         minutes = (totalSeconds % Constants.Time.secondsPerHour) / Constants.Time.secondsPerMinute
         seconds = totalSeconds % Constants.Time.secondsPerMinute
-    }
-
-    var shortFormat: String {
-        if hours > 0 {
-            return "\(hours)h\(minutes)m"
-        } else {
-            return "\(minutes)m"
-        }
     }
 
     var longFormat: String {
@@ -393,6 +383,38 @@ final class BreakOverlayController {
     }
 }
 
+// MARK: - Nook Glyph
+
+/// Nook's mark: an arched alcove with a dot inside. Drawn as a template image
+/// so the menu bar tints it for light and dark appearances.
+private enum NookGlyph {
+    static let image: NSImage = {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let body = rect.insetBy(dx: 2.5, dy: 1.5)
+            let radius = body.width / 2
+
+            let arch = NSBezierPath()
+            arch.move(to: NSPoint(x: body.minX, y: body.minY))
+            arch.line(to: NSPoint(x: body.minX, y: body.maxY - radius))
+            arch.appendArc(withCenter: NSPoint(x: body.midX, y: body.maxY - radius),
+                           radius: radius, startAngle: 180, endAngle: 0, clockwise: true)
+            arch.line(to: NSPoint(x: body.maxX, y: body.minY))
+            arch.close()
+            arch.lineWidth = 1.6
+            arch.lineJoinStyle = .round
+            NSColor.black.setStroke()
+            arch.stroke()
+
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: NSRect(x: body.midX - 2.5, y: body.minY + 3, width: 5, height: 5)).fill()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "Nook"
+        return image
+    }()
+}
+
 // MARK: - App Entry Point
 
 @main
@@ -439,10 +461,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func setupStatusBar() {
-        statusItem = NSStatusBar.system.statusItem(withLength: Constants.UI.statusBarWidth)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         guard let button = statusItem.button else { return }
-        button.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: "Nook")
+        button.image = NookGlyph.image
         button.action = #selector(togglePopover)
         button.target = self
     }
@@ -474,8 +496,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         guard let button = statusItem.button else { return }
         removeHighlight()
 
-        // Use fixed size and center within button
-        let width = Constants.Highlight.fixedWidth
+        // Span the button's width so the highlight matches the icon-only item
+        let width = button.bounds.width
         let height = Constants.Highlight.fixedHeight
         let x = (button.bounds.width - width) / 2
         let y = (button.bounds.height - height) / 2
@@ -572,29 +594,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func updateStatusItem() {
+        // Icon only, so the item stays the same size as other menu bar icons;
+        // the countdowns live in the popover
         if let button = statusItem.button {
-            if let breakRemaining = breakReminder.breakTimeRemaining {
-                // Break countdown takes priority while a break is running
-                button.title = " \(TimeRemaining(from: breakRemaining).clockFormat)"
+            if breakReminder.breakTimeRemaining != nil {
+                // Break state takes priority while a break is running
                 button.image = NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: "On Break")
             } else if shutdownDate != nil {
-                // Show countdown in menu bar when scheduled
-                let shortTime = getShortTimeRemaining()
-                button.title = " \(shortTime)"
                 button.image = NSImage(systemSymbolName: "power.circle.fill", accessibilityDescription: "Shutdown Scheduled")
             } else {
-                button.title = ""
-                button.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: "Nook")
+                button.image = NookGlyph.image
             }
         }
-    }
-
-    func getShortTimeRemaining() -> String {
-        guard let shutdownDate = shutdownDate else { return "" }
-        let remaining = shutdownDate.timeIntervalSinceNow
-
-        guard remaining > 0 else { return "Now" }
-        return TimeRemaining(from: remaining).shortFormat
     }
 
     func getTimeRemaining() -> String? {
@@ -669,8 +680,10 @@ struct ContentView: View {
 
     private var headerView: some View {
         HStack {
-            Image(systemName: "square.grid.2x2.fill")
-                .font(.title2)
+            Image(nsImage: NookGlyph.image)
+                .renderingMode(.template)
+                .resizable()
+                .frame(width: 22, height: 22)
             Text("Nook")
                 .font(.headline)
         }
