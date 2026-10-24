@@ -1,2 +1,30 @@
-.claude
-PowerOffTimer.app
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editors / tools
+.claude/
+.vscode/
+.idea/
+*.swp
+*~
+
+# Swift build output (produced by build.sh)
+Nook.app/
+*.o
+*.dSYM/
+.build/
+
+# Go build output
+/tools
+/clean-zsh/clean-zsh
+*.exe
+*.test
+*.out
+vendor/
+
+# Env / secrets
+.env
+.env.*
