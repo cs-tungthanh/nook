@@ -5,13 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>PowerOffTimer</string>
+    <string>Nook</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>com.powerofftimer.app</string>
+    <string>com.nook.app</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>PowerOffTimer</string>
+    <string>Nook</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -23,8 +25,8 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>This app needs permission to shut down your Mac at the scheduled time.</string>
+    <string>Nook needs permission to shut down your Mac at the scheduled time.</string>
     <key>NSUserNotificationsUsageDescription</key>
-    <string>This app sends notifications about scheduled shutdowns.</string>
+    <string>Nook sends notifications about scheduled shutdowns and break reminders.</string>
 </dict>
 </plist>

@@ -111,7 +111,11 @@ private enum Notifier {
         }
 
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                NSLog("Nook: failed to post notification: \(error.localizedDescription)")
+            }
+        }
     }
 
     static func registerBreakCategory() {
@@ -392,7 +396,7 @@ final class BreakOverlayController {
 // MARK: - App Entry Point
 
 @main
-struct PowerOffTimerApp: App {
+struct NookApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
@@ -425,14 +429,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private func requestNotificationPermissions() {
         UNUserNotificationCenter.current().delegate = self
         Notifier.registerBreakCategory()
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error = error {
+                NSLog("Nook: notification authorization failed: \(error.localizedDescription)")
+            } else if !granted {
+                NSLog("Nook: notifications not allowed — enable them in System Settings › Notifications")
+            }
+        }
     }
 
     private func setupStatusBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: Constants.UI.statusBarWidth)
 
         guard let button = statusItem.button else { return }
-        button.image = NSImage(systemSymbolName: "power", accessibilityDescription: "Power Off Timer")
+        button.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: "Nook")
         button.action = #selector(togglePopover)
         button.target = self
     }
@@ -571,10 +581,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 // Show countdown in menu bar when scheduled
                 let shortTime = getShortTimeRemaining()
                 button.title = " \(shortTime)"
-                button.image = NSImage(systemSymbolName: "power.circle.fill", accessibilityDescription: "Power Off Timer Active")
+                button.image = NSImage(systemSymbolName: "power.circle.fill", accessibilityDescription: "Shutdown Scheduled")
             } else {
                 button.title = ""
-                button.image = NSImage(systemSymbolName: "power", accessibilityDescription: "Power Off Timer")
+                button.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: "Nook")
             }
         }
     }
@@ -659,9 +669,9 @@ struct ContentView: View {
 
     private var headerView: some View {
         HStack {
-            Image(systemName: "power")
+            Image(systemName: "square.grid.2x2.fill")
                 .font(.title2)
-            Text("Power Off Timer")
+            Text("Nook")
                 .font(.headline)
         }
         .padding()
@@ -750,7 +760,7 @@ struct ContentView: View {
 
     private var quickActionsView: some View {
         VStack(spacing: 12) {
-            Text("Quick Actions")
+            Text("Power Off")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)

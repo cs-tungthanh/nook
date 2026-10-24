@@ -1,88 +1,114 @@
-# Power Off Timer for macOS
+<p align="center"><img src="icon/preview.png" width="128" alt="Nook icon"></p>
 
-A native macOS menu bar app to schedule system shutdowns.
+# Nook
 
-## Features
+**Your little corner of utilities.**
 
-- **Quick Actions**: Three preset buttons - 30min, 40min, or 1 hour
-- **Custom Timer**: Input any number of minutes (defaults to 20)
-- **Menu bar integration**: Lightweight app that lives in your menu bar
-- **Real-time countdown**: Timer updates every second in both menu bar and popup
-- **Clear visual feedback**:
-  - Menu bar shows countdown time (e.g., "1h30m") when scheduled
-  - Red "SHUTDOWN SCHEDULED" badge with pulsing indicator
-  - Icon changes to filled state
-- **Notifications**: Get notified when shutdown is scheduled or cancelled
-- **Easy cancellation**: Cancel scheduled shutdowns with one click
-- **Break reminders**: Get reminded to relax every N minutes (default 20)
-  - Choose the break length: 10m, 30m, 1h or 2h
-  - Two styles: a **Notification** with Start break / Snooze / Skip actions, or a **Full screen** blurred overlay with a countdown (Esc to skip; the screen is never locked)
-  - Shows a ☕ countdown in the menu bar during a break
-  - Pauses while your Mac is locked or asleep, and settings are remembered between launches
+Nook is a lightweight macOS app that brings everyday utilities together in one convenient place. From managing breaks to scheduling shutdowns and cleaning up your system, Nook helps you take care of small tasks without interrupting your workflow.
 
-## Building the App
+## ✨ Features
 
-1. Make the build script executable:
-   ```bash
-   chmod +x build.sh
-   ```
+Nook lives in your menu bar. Click the grid icon to open it.
 
-2. Build the app:
-   ```bash
-   ./build.sh
-   ```
+- **Power-off Timer** — Schedule your Mac to shut down after a set time.
+  - One-click presets: 30min, 40min or 1h, or enter any number of minutes.
+  - A live countdown in the menu bar (e.g. `1h30m`) and in the popup.
+  - Cancel with one click. You get a notification when a shutdown is scheduled or cancelled.
+- **Break Timer** — Remind yourself to take regular breaks and step away from your screen.
+  - A reminder every N minutes (20 by default), with breaks of 10m, 30m, 1h or 2h.
+  - Two styles: a **Notification** with Start break / Snooze / Skip actions, or a **Full screen** blurred overlay with a countdown (press Esc to skip; the screen is never locked).
+  - A ☕ countdown in the menu bar during a break.
+  - Pauses while your Mac is locked or asleep. Settings are remembered between launches.
+- **Cleanup** — Command-line tools that keep your system tidy (not in the menu bar app yet):
+  - `clean-zsh` removes duplicate commands from `~/.zsh_history`, keeping the latest of each.
+  - The bookmark updater follows redirects in your Microsoft Edge bookmarks and rewrites links that have moved.
+- **More Utilities** — A growing collection of handy tools for everyday tasks.
 
-3. Run the app:
-   ```bash
-   open PowerOffTimer.app
-   ```
+> Features are planned to evolve as Nook grows.
 
-## Installation
+## 🎯 Philosophy
 
-Copy the app to your Applications folder:
+Nook is built around a few simple principles:
+
+- **Simple** — Do one thing well, without unnecessary complexity.
+- **Lightweight** — Stay out of your way and use resources responsibly.
+- **Convenient** — Keep useful tools within easy reach.
+- **Native** — Feel at home on macOS, with an interface that is clean and familiar.
+- **Extensible** — Make it easy to add new utilities as needs evolve.
+
+## 🖥️ Platform
+
+- macOS
+
+## 🚀 Getting Started
+
+### Requirements
+
+- macOS 13 (Ventura) or later
+- Swift compiler (comes with Xcode or the Command Line Tools)
+- Go, for the command-line tools
+
+### Build and run the app
+
 ```bash
-cp -r PowerOffTimer.app /Applications/
+./build.sh
+open Nook.app
 ```
 
-Then launch it from Applications or Spotlight.
+To install it, copy it to your Applications folder:
 
-## Usage
+```bash
+cp -r Nook.app /Applications/
+```
 
-### Scheduling a Shutdown
+On first use, macOS asks for two permissions:
 
-**Quick Actions:**
-1. Click the power icon in the menu bar
-2. Click one of the preset buttons: **30min**, **40min**, or **1h**
-3. Done! The shutdown is scheduled
+- **Automation** — to shut down your Mac at the scheduled time.
+- **Notifications** — for shutdown alerts and break reminders.
 
-**Custom Timer:**
-1. Click the power icon in the menu bar
-2. Enter your desired minutes in the text field (defaults to 20)
-3. Click the play button
-4. Done! The shutdown is scheduled
+### Command-line tools
 
-### Monitoring & Cancellation
-- The menu bar icon will show the countdown time (e.g., "1h30m")
-- A red "SHUTDOWN SCHEDULED" badge appears in the popup
-- The live countdown updates every second
-- To cancel, click the icon and press the red "Cancel Shutdown" button
+```bash
+# Remove duplicate commands from ~/.zsh_history (a backup is saved as .zsh_history.bak)
+go run ./clean-zsh [path/to/history]
 
-## Permissions
+# Preview which Edge bookmark URLs have moved, then save them with -apply
+go run . [-apply] [-wait 3] [-bookmarks path] [-edge path]
+```
 
-The app requires:
-- **Automation permission**: To execute the shutdown command
-- **Notifications permission**: To show alerts about scheduled shutdowns
+Close Edge completely before running the bookmark updater with `-apply`, because Edge can overwrite its bookmarks file when it quits.
 
-macOS will prompt you for these permissions on first use.
+### Project layout
 
-## Requirements
+| Path | What it is |
+|---|---|
+| `Nook.swift` | The menu bar app (SwiftUI + AppKit) |
+| `Info.plist` | App bundle settings |
+| `build.sh` | Compiles, bundles and signs `Nook.app` |
+| `icon/` | App icon and the script that draws it (`swift icon/make-icon.swift`) |
+| `clean-zsh/` | Zsh history cleaner |
+| `main.go` | Edge bookmark updater |
 
-- macOS 13.0 (Ventura) or later
-- Swift compiler (comes with Xcode or Command Line Tools)
+## 🛣️ Roadmap
 
-## Technical Details
+- [x] Build the core app interface
+- [x] Implement the break timer
+- [x] Add scheduled power-off functionality
+- [ ] Bring the cleanup utilities into the app
+- [x] Add a menu bar interface for quick access
+- [ ] Support configurable preferences
+- [ ] Expand the collection of utilities over time
 
-- Built with Swift and SwiftUI
-- Uses NSStatusBar for menu bar integration
-- Uses NSAppleScript for system shutdown
-- Uses UserNotifications for alerts
+## 🤝 Contributing
+
+Nook is a work in progress. Ideas, suggestions, and contributions are welcome.
+
+## 📄 License
+
+The license has not been decided yet.
+
+---
+
+Made for the little things that make your day easier.
+
+**Nook** — Your little corner of utilities.
