@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -71,10 +72,26 @@ func run() error {
 		"wait", 3,
 		"Maximum seconds to wait for JavaScript redirects (0-30)",
 	)
+	timeoutSeconds := flag.Int(
+		"timeout", 20,
+		"Maximum seconds to spend on one bookmark before giving up",
+	)
+	workers := flag.Int(
+		"workers", 20,
+		"Number of bookmarks to check at the same time (1-32)",
+	)
 	flag.Parse()
+
+	if *workers < 1 || *workers > 32 {
+		return errors.New("-workers must be between 1 and 32")
+	}
 
 	if *waitSeconds < 0 || *waitSeconds > 30 {
 		return errors.New("-wait must be between 0 and 30")
+	}
+
+	if *timeoutSeconds <= *waitSeconds {
+		return errors.New("-timeout must be greater than -wait")
 	}
 
 	if _, err := os.Stat(*bookmarksPath); err != nil {
@@ -172,75 +189,57 @@ func run() error {
 		return fmt.Errorf("start Edge: %w", err)
 	}
 
+	results := make([]bookmarkResult, len(bookmarks))
+	jobs := make(chan int)
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		done int
+	)
+
+	fmt.Printf("Checking with %d workers at a time\n", min(*workers, len(bookmarks)))
+
+	for range *workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for i := range jobs {
+				oldURL := bookmarks[i]["url"].(string)
+
+				mu.Lock()
+				fmt.Printf("  checking: %s\n", oldURL)
+				mu.Unlock()
+
+				res := checkBookmark(browserCtx, oldURL, *waitSeconds, *timeoutSeconds)
+				results[i] = res
+
+				mu.Lock()
+				done++
+				fmt.Printf("[%d/%d] %s\n%s", done, len(bookmarks), oldURL, res.report)
+				mu.Unlock()
+			}
+		}()
+	}
+
+	for i := range bookmarks {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
 	changed := 0
 	skipped := 0
 
-	for i, bookmark := range bookmarks {
-		oldURL, ok := bookmark["url"].(string)
-		if !ok || !isHTTPURL(oldURL) {
+	for i, res := range results {
+		switch {
+		case res.skip:
 			skipped++
-			continue
+		case res.newURL != "":
+			bookmarks[i]["url"] = res.newURL
+			changed++
 		}
-
-		fmt.Printf("[%d/%d] Checking %s\n", i+1, len(bookmarks), oldURL)
-
-		tabCtx, cancelTab := chromedp.NewContext(browserCtx)
-
-		navErr := chromedp.Do(tabCtx, chromedp.Navigate(oldURL))
-
-		// Even if navigation reports an error, inspect the current URL.
-		// JavaScript navigation can interrupt the original navigation.
-		currentURL := oldURL
-		deadline := time.Now().Add(time.Duration(*waitSeconds) * time.Second)
-
-		for {
-			location, locationErr := chromedp.Run(
-				tabCtx, chromedp.Location(),
-			)
-
-			if locationErr == nil && location != "" {
-				currentURL = location
-			}
-
-			if isLoginRedirect(currentURL) {
-				break
-			}
-
-			if time.Now().After(deadline) {
-				break
-			}
-
-			time.Sleep(250 * time.Millisecond)
-		}
-
-		cancelTab()
-
-		if isLoginRedirect(currentURL) {
-			fmt.Printf("  SKIP: redirected to a login page\n")
-			skipped++
-			continue
-		}
-
-		if !isHTTPURL(currentURL) {
-			fmt.Printf("  SKIP: final URL is not HTTP(S): %s\n", currentURL)
-			skipped++
-			continue
-		}
-
-		if currentURL == oldURL {
-			if navErr != nil {
-				fmt.Printf("  WARNING: navigation error: %v\n", navErr)
-			} else {
-				fmt.Printf("  Unchanged\n")
-			}
-			continue
-		}
-
-		fmt.Printf("  OLD: %s\n", oldURL)
-		fmt.Printf("  NEW: %s\n", currentURL)
-
-		bookmark["url"] = currentURL
-		changed++
 	}
 
 	fmt.Printf("\nFinished. Changed: %d, skipped: %d\n", changed, skipped)
@@ -264,6 +263,10 @@ func run() error {
 		return fmt.Errorf("create backup: %w", err)
 	}
 	fmt.Printf("Backup created: %s\n", backupPath)
+
+	// The checksum covers every URL, so it is stale now. Edge accepts a
+	// file without one and writes a fresh checksum on its next save.
+	delete(root, "checksum")
 
 	output, err := json.MarshalIndent(root, "", "    ")
 	if err != nil {
@@ -310,6 +313,98 @@ func run() error {
 	return nil
 }
 
+type bookmarkResult struct {
+	newURL string // empty when the bookmark keeps its URL
+	report string
+	skip   bool
+}
+
+// checkBookmark opens rawURL in a new tab and reports where it ends up.
+func checkBookmark(browserCtx context.Context, oldURL string, waitSeconds, timeoutSeconds int) bookmarkResult {
+	if !isHTTPURL(oldURL) {
+		return bookmarkResult{report: "  SKIP: not an HTTP(S) URL\n", skip: true}
+	}
+
+	tabCtx, cancelTab := chromedp.NewContext(browserCtx)
+	defer cancelTab()
+
+	// Open the tab before adding timeouts. The tab's event loop runs on the
+	// context of its first call, so a cancelled timeout context would stop
+	// it and leave every later call waiting forever.
+	if err := chromedp.Do(tabCtx); err != nil {
+		return bookmarkResult{report: fmt.Sprintf("  WARNING: cannot open tab: %v\n", err)}
+	}
+
+	// A slow or hanging site must not block the remaining bookmarks.
+	// Every call below, including reading the location, shares this limit.
+	ctx, cancel := context.WithTimeout(
+		tabCtx, time.Duration(timeoutSeconds)*time.Second,
+	)
+	defer cancel()
+
+	navCtx, cancelNav := context.WithTimeout(
+		ctx, time.Duration(timeoutSeconds-waitSeconds)*time.Second,
+	)
+	navErr := chromedp.Do(navCtx, chromedp.Navigate(oldURL))
+	cancelNav()
+
+	// Even if navigation reports an error, inspect the current URL.
+	// JavaScript navigation can interrupt the original navigation.
+	currentURL := oldURL
+	deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
+
+	for {
+		location, locationErr := chromedp.Run(ctx, chromedp.Location())
+
+		if locationErr == nil && location != "" {
+			currentURL = location
+		}
+
+		if isLoginRedirect(currentURL) {
+			break
+		}
+
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			break
+		}
+
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	if isLoginRedirect(currentURL) {
+		return bookmarkResult{
+			report: fmt.Sprintf("  SKIP: redirected to a login page: %s\n", currentURL),
+			skip:   true,
+		}
+	}
+
+	if isChallengePage(currentURL) {
+		return bookmarkResult{
+			report: fmt.Sprintf("  SKIP: stopped at a bot check: %s\n", currentURL),
+			skip:   true,
+		}
+	}
+
+	if !isHTTPURL(currentURL) {
+		return bookmarkResult{
+			report: fmt.Sprintf("  SKIP: final URL is not HTTP(S): %s\n", currentURL),
+			skip:   true,
+		}
+	}
+
+	if currentURL == oldURL {
+		if navErr != nil {
+			return bookmarkResult{report: fmt.Sprintf("  WARNING: navigation error: %v\n", navErr)}
+		}
+		return bookmarkResult{report: "  Unchanged\n"}
+	}
+
+	return bookmarkResult{
+		newURL: currentURL,
+		report: fmt.Sprintf("  OLD: %s\n  NEW: %s\n", oldURL, currentURL),
+	}
+}
+
 // isLoginRedirect prevents login pages from being saved as destination URLs.
 func isLoginRedirect(rawURL string) bool {
 	u, err := url.Parse(rawURL)
@@ -318,11 +413,32 @@ func isLoginRedirect(rawURL string) bool {
 	}
 
 	host := strings.ToLower(u.Hostname())
-	path := strings.ToLower(u.Path)
+	for _, prefix := range []string{"login.", "signin.", "auth.", "sso.", "accounts."} {
+		if strings.HasPrefix(host, prefix) {
+			return true
+		}
+	}
 
-	return host == "accounts.google.com" ||
-		strings.Contains(path, "/login") ||
-		strings.Contains(path, "/signin")
+	for _, segment := range strings.Split(strings.ToLower(u.Path), "/") {
+		switch segment {
+		case "login", "log-in", "signin", "sign-in", "sign_in",
+			"auth", "authorize", "oauth", "oauth2", "sso", "session", "sessions":
+			return true
+		}
+	}
+
+	return false
+}
+
+// isChallengePage catches bot checks that headless Edge cannot pass.
+func isChallengePage(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+
+	return strings.Contains(u.Path, "/cdn-cgi/") ||
+		strings.Contains(u.RawQuery, "__cf_chl_")
 }
 
 func isHTTPURL(rawURL string) bool {
