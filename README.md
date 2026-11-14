@@ -24,6 +24,7 @@ Nook lives in your menu bar. Click the grid icon to open it.
   - Include **System** audio (what your Mac plays), your **Microphone**, or both. Your choices are remembered.
   - **Stop** pauses the recording. Then **Resume** to keep recording into the same video, **Save** to finish it, or **Discard** to delete it.
   - **Save** opens a dialog to name the `.mov` and pick a folder (Desktop by default), then shows it in Finder. Cancelling asks before deleting the recording. Quitting Nook with an unsaved recording asks where to save it first.
+  - While recording, a red **Stop** button with the elapsed time appears in the menu bar; click it to stop, and the popup opens so you can resume or save.
   - A record icon in the menu bar while recording (a pause icon while stopped) and a running timer in the popup; Nook's own popup is left out of the video.
   - Very wide videos (for example two Retina screens) are saved as HEVC and scaled down to what the encoder supports.
   - The first time, macOS asks you to allow Nook under **Screen & System Audio Recording** (and **Microphone** if you include it).

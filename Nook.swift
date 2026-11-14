@@ -708,6 +708,7 @@ final class ScreenRecorder: NSObject, ObservableObject {
         do {
             content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         } catch {
+            NSLog("Nook: listing shareable content failed: \(error.localizedDescription)")
             throw RecorderError.screenAccessDenied
         }
 
@@ -1840,6 +1841,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var shutdownDate: Date?
     var highlightView: NSView?
     private var outsideClickMonitor: Any?
+    /// A separate menu bar button, shown only while recording, that stops it in one click
+    private var stopRecordingItem: NSStatusItem?
+    private var stopRecordingTimer: Timer?
     let breakReminder = BreakReminder()
     let screenRecorder = ScreenRecorder()
     let bluetooth = BluetoothManager()
@@ -1853,6 +1857,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         screenRecorder.onChange = { [weak self] in
             self?.updateStatusItem()
+            self?.updateStopRecordingItem()
         }
     }
 
@@ -1879,6 +1884,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func saveRecording() {
         popover.performClose(nil)
         screenRecorder.save()
+    }
+
+    /// Stops the recording from the menu bar, then opens the popover so the
+    /// user can resume, save or discard it.
+    @objc private func stopRecordingFromMenuBar() {
+        screenRecorder.pause { [weak self] in
+            guard let self = self, self.screenRecorder.isPaused, !self.popover.isShown else { return }
+            self.togglePopover()
+        }
+    }
+
+    private func updateStopRecordingItem() {
+        guard screenRecorder.state == .recording else {
+            stopRecordingTimer?.invalidate()
+            stopRecordingTimer = nil
+            if let item = stopRecordingItem {
+                NSStatusBar.system.removeStatusItem(item)
+                stopRecordingItem = nil
+            }
+            return
+        }
+        guard stopRecordingItem == nil else { return }
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+            button.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "Stop Recording")?
+                .withSymbolConfiguration(config)
+            button.contentTintColor = .systemRed
+            button.imagePosition = .imageLeading
+            button.toolTip = "Stop Recording"
+            button.target = self
+            button.action = #selector(stopRecordingFromMenuBar)
+        }
+        stopRecordingItem = item
+        refreshStopRecordingTitle()
+
+        let timer = Timer(timeInterval: Constants.Time.updateInterval, repeats: true) { [weak self] _ in
+            self?.refreshStopRecordingTitle()
+        }
+        // .common keeps the timer ticking while a menu is open
+        RunLoop.main.add(timer, forMode: .common)
+        stopRecordingTimer = timer
+    }
+
+    private func refreshStopRecordingTitle() {
+        guard let button = stopRecordingItem?.button else { return }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
+        button.attributedTitle = NSAttributedString(
+            string: " " + TimeRemaining(from: screenRecorder.elapsed).clockFormat,
+            attributes: [.font: font]
+        )
     }
 
     private func requestNotificationPermissions() {
