@@ -19,6 +19,14 @@ Nook lives in your menu bar. Click the grid icon to open it.
   - Two styles: a **Notification** with Start break / Snooze / Skip actions, or a **Full screen** blurred overlay with a countdown (press Esc to skip; the screen is never locked).
   - A ☕ countdown in the menu bar during a break.
   - Pauses while your Mac is locked or asleep. Settings are remembered between launches.
+- **Screen Recording** — Record your screens with audio (macOS 15 or later).
+  - **Source**: one **Screen** (pick which when you have several), **All screens** side by side in one video, or an **Area** you drag out after pressing Record (Esc cancels).
+  - Include **System** audio (what your Mac plays), your **Microphone**, or both. Your choices are remembered.
+  - **Stop** pauses the recording. Then **Resume** to keep recording into the same video, **Save** to finish it, or **Discard** to delete it.
+  - **Save** opens a dialog to name the `.mov` and pick a folder (Desktop by default), then shows it in Finder. Cancelling asks before deleting the recording. Quitting Nook with an unsaved recording asks where to save it first.
+  - A record icon in the menu bar while recording (a pause icon while stopped) and a running timer in the popup; Nook's own popup is left out of the video.
+  - Very wide videos (for example two Retina screens) are saved as HEVC and scaled down to what the encoder supports.
+  - The first time, macOS asks you to allow Nook under **Screen & System Audio Recording** (and **Microphone** if you include it).
 - **Cleanup** — Command-line tools that keep your system tidy (not in the menu bar app yet):
   - `clean-zsh` removes duplicate commands from `~/.zsh_history`, keeping the latest of each.
   - The bookmark updater follows redirects in your Microsoft Edge bookmarks and rewrites links that have moved.
@@ -55,11 +63,13 @@ Nook is built around a few simple principles:
 open Nook.app
 ```
 
-To install it, copy it to your Applications folder:
+To install it, or to update an installed copy, run:
 
 ```bash
-cp -r Nook.app /Applications/
+./install.sh
 ```
+
+It builds Nook, quits any running copy (an unsaved recording still gets its save prompt), replaces `/Applications/Nook.app` and launches it. `./install.sh --uninstall` quits and removes Nook.
 
 On first use, macOS asks for two permissions:
 
@@ -85,6 +95,7 @@ Close Edge completely before running the bookmark updater with `-apply`, because
 | `Nook.swift` | The menu bar app (SwiftUI + AppKit) |
 | `Info.plist` | App bundle settings |
 | `build.sh` | Compiles, bundles and signs `Nook.app` |
+| `install.sh` | Builds and reinstalls Nook in `/Applications` (`--uninstall` removes it) |
 | `icon/` | App icon and the script that draws it (`swift icon/make-icon.swift`) |
 | `clean-zsh/` | Zsh history cleaner |
 | `main.go` | Edge bookmark updater |

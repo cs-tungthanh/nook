@@ -26,6 +26,10 @@
     <true/>
     <key>NSAppleEventsUsageDescription</key>
     <string>Nook needs permission to shut down your Mac at the scheduled time.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Nook lists your Bluetooth devices so you can connect and disconnect them from the menu bar.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Nook records your microphone when you include it in a screen recording.</string>
     <key>NSUserNotificationsUsageDescription</key>
     <string>Nook sends notifications about scheduled shutdowns and break reminders.</string>
 </dict>
