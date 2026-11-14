@@ -21,9 +21,19 @@ cp Info.plist Nook.app/Contents/
 mkdir -p Nook.app/Contents/Resources
 cp icon/AppIcon.icns Nook.app/Contents/Resources/
 
-# Ad-hoc sign the whole bundle so Info.plist is bound and the app gets its
-# bundle identity — UserNotifications silently refuses linker-signed binaries
-codesign --force --deep --sign - Nook.app
+# Sign the whole bundle so Info.plist is bound and the app gets its bundle
+# identity — UserNotifications silently refuses linker-signed binaries.
+# Prefer a real certificate: privacy grants (Screen Recording, Microphone) are
+# tied to the signature, and an ad-hoc one changes on every build, so macOS
+# would forget the grant after each rebuild. Override with NOOK_SIGN_IDENTITY
+# (use "-" to force ad-hoc).
+SIGN_IDENTITY="${NOOK_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '/"Apple Development|"Developer ID Application/ { print $2; exit }')}"
+if [ -z "$SIGN_IDENTITY" ]; then
+    SIGN_IDENTITY="-"
+    echo "No signing certificate found; signing ad-hoc (privacy permissions reset on every build)."
+fi
+codesign --force --deep --sign "$SIGN_IDENTITY" Nook.app
 
 echo "Build complete!"
 echo ""

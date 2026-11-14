@@ -58,6 +58,10 @@ echo "Launching ${APP_NAME}..."
 open "$INSTALL_PATH"
 
 echo ""
-echo "Installed. If screen recording stops working after an update, remove Nook"
-echo "under System Settings › Privacy & Security › Screen & System Audio Recording,"
-echo "then allow it again (each build has a new ad-hoc signature)."
+echo "Installed."
+if codesign -dv "$INSTALL_PATH" 2>&1 | grep -q "Signature=adhoc"; then
+    echo "This build is ad-hoc signed, so macOS forgets its Screen Recording and"
+    echo "Microphone permissions on every update. Remove Nook under System Settings ›"
+    echo "Privacy & Security › Screen & System Audio Recording, allow it again, and"
+    echo "relaunch Nook. A signing certificate (see build.sh) avoids this."
+fi
