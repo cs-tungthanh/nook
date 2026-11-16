@@ -1478,20 +1478,24 @@ final class BluetoothManager: NSObject, ObservableObject {
         case .poweredOff:
             setUnavailable(.poweredOff)
         case .poweredOn:
-            availability = .ready
+            // Publishing re-renders the whole popover, so skip it when nothing changed
+            if availability != .ready { availability = .ready }
             watchConnections()
-            let paired = ((IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []).map(Self.info)
             refreshGeneration += 1
             let generation = refreshGeneration
+            // Each IOBluetooth property read is a round trip to bluetoothd; doing
+            // them on the main thread held up the popover every time it opened
             reportQueue.async { [weak self] in
+                let paired = ((IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []).map(Self.info)
                 let report = SystemBluetoothReport.load()
+                let devices = Self.merge(paired, with: report).sorted {
+                    if $0.isConnected != $1.isConnected { return $0.isConnected }
+                    return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                }
                 DispatchQueue.main.async {
                     // A newer refresh (or Bluetooth turning off) supersedes this one
                     guard let self = self, generation == self.refreshGeneration else { return }
-                    self.devices = Self.merge(paired, with: report).sorted {
-                        if $0.isConnected != $1.isConnected { return $0.isConnected }
-                        return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-                    }
+                    if self.devices != devices { self.devices = devices }
                 }
             }
         default:
@@ -1607,8 +1611,8 @@ final class BluetoothManager: NSObject, ObservableObject {
 
     private func setUnavailable(_ state: Availability) {
         refreshGeneration += 1
-        availability = state
-        devices = []
+        if availability != state { availability = state }
+        if !devices.isEmpty { devices = [] }
     }
 
     // MARK: Device Details
@@ -1962,6 +1966,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private func setupPopover() {
         popover = NSPopover()
         popover.behavior = .transient
+        // The grow-and-fade animation adds about 0.2s before the content is usable
+        popover.animates = false
         popover.delegate = self
 
         // Let the popover follow the SwiftUI height as the break reminder card expands
@@ -2134,8 +2140,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
 // MARK: - NSPopoverDelegate
 extension AppDelegate: NSPopoverDelegate {
-    func popoverWillShow(_ notification: Notification) {
-        // Battery levels and connections change while the popover is closed
+    func popoverDidShow(_ notification: Notification) {
+        // Battery levels and connections change while the popover is closed.
+        // Refresh once it's on screen so the work never delays it appearing.
         bluetooth.refresh()
     }
 
