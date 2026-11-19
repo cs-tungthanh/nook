@@ -4,30 +4,51 @@
 
 **Your little corner of utilities.**
 
-Nook is a lightweight macOS app that brings everyday utilities together in one convenient place. From managing breaks to scheduling shutdowns and cleaning up your system, Nook helps you take care of small tasks without interrupting your workflow.
+Nook is a lightweight macOS app that brings everyday utilities together in one convenient place. From Pomodoro focus sessions to scheduling shutdowns and cleaning up your system, Nook helps you take care of small tasks without interrupting your workflow.
 
 ## ✨ Features
 
-Nook lives in your menu bar. Click the grid icon to open it.
+Nook lives in your menu bar. Click its icon and Nook drops down from the notch at the top center of the screen, like the Dynamic Island. Click the icon again, click anywhere else or press Esc to fold it back up.
+
+The island has two pages. **Utilities** shows four tiles side by side: Pomodoro and Power Off on the left, Screen Recording and Bluetooth on the right. **System** shows your Mac's vitals. Switch between them with the button in the island's header, next to **Quit**.
+
+<p align="center">
+  <img src="screenshots/utilities.png" width="700" alt="The Utilities page: Pomodoro, Power Off, Screen Recording and Bluetooth tiles">
+</p>
+
+<p align="center">
+  <img src="screenshots/system.png" width="700" alt="The System page: CPU, GPU, Memory, Battery, Network, Available disk space and Power tiles">
+</p>
 
 - **Power-off Timer** — Schedule your Mac to shut down after a set time.
-  - Pick a preset (30m, 40m or 1h) or step to any number of minutes, then press Start.
-  - A live countdown in the popup, and a power icon in the menu bar while a shutdown is scheduled.
+  - Click or drag along the ruler to pick 5 minutes to 2 hours in 5-minute steps, then press Start.
+  - A live countdown in the island, and a power icon in the menu bar while a shutdown is scheduled.
   - Cancel with one click. You get a notification when a shutdown is scheduled or cancelled.
-- **Break Timer** — Remind yourself to take regular breaks and step away from your screen.
-  - A reminder every N minutes (20 by default), with breaks of 2m, 5m, 10m or 20m.
-  - Two styles: a **Notification** with Start break / Snooze / Skip actions, or a **Full screen** blurred overlay with a countdown (press Esc to skip; the screen is never locked).
-  - A ☕ countdown in the menu bar during a break.
+- **Pomodoro** — Focus in sprints and take regular breaks away from your screen.
+  - A colorful card in the island: press **Start focusing**, then watch a live countdown ring — tomato red while you focus, mint green on a break, grey while paused.
+  - Focus for N minutes (20 by default), then break for 2m, 5m, 10m or 20m. **Break now** starts a break early; **Back to focus** ends one.
+  - Two break styles: a **Notification** with Start break / Snooze / Skip actions, or a **Full screen** blurred overlay with a countdown (press Esc to get back to focus; the screen is never locked).
+  - A ☕ icon in the menu bar during a break.
   - Pauses while your Mac is locked or asleep. Settings are remembered between launches.
 - **Screen Recording** — Record your screens with audio (macOS 15 or later).
   - **Source**: one **Screen** (pick which when you have several), **All screens** side by side in one video, or an **Area** you drag out after pressing Record (Esc cancels).
   - Include **System** audio (what your Mac plays), your **Microphone**, or both. Your choices are remembered.
   - **Stop** pauses the recording. Then **Resume** to keep recording into the same video, **Save** to finish it, or **Discard** to delete it.
   - **Save** opens a dialog to name the `.mov` and pick a folder (Desktop by default), then shows it in Finder. Cancelling asks before deleting the recording. Quitting Nook with an unsaved recording asks where to save it first.
-  - While recording, a red **Stop** button with the elapsed time appears in the menu bar; click it to stop, and the popup opens so you can resume or save.
-  - A record icon in the menu bar while recording (a pause icon while stopped) and a running timer in the popup; Nook's own popup is left out of the video.
+  - While recording, a red **Stop** button with the elapsed time appears in the menu bar; click it to stop, and the island opens so you can resume or save.
+  - A record icon in the menu bar while recording (a pause icon while stopped) and a running timer in the island; Nook's own island is left out of the video.
   - Very wide videos (for example two Retina screens) are saved as HEVC and scaled down to what the encoder supports.
   - The first time, macOS asks you to allow Nook under **Screen & System Audio Recording** (and **Microphone** if you include it).
+- **Bluetooth** — Your paired devices, one tap from connecting.
+  - Each device shows whether it's connected and its battery level, including left, right and case for AirPods.
+  - **Connect** or **Disconnect** with one click. The first four devices are shown; **Show all** lists the rest.
+  - To forget a device, use **System Settings › Bluetooth**. macOS doesn't let other apps unpair devices.
+  - The first time, macOS asks you to allow Nook under **Bluetooth**.
+- **System** — Press **System** in the island's header to see your Mac's vitals at a glance; press **Utilities** to go back.
+  - **CPU**, **GPU** and **Memory** usage, each with a meter that turns orange above 85%.
+  - **Battery** level and whether it's charging, and **Network** download and upload speed.
+  - **Available** disk space, and **Power**: how many watts your Mac draws, with the adapter's rating when plugged in.
+  - Updates every 1.5 seconds, and only while the page is open.
 - **Cleanup** — Command-line tools that keep your system tidy (not in the menu bar app yet):
   - `clean-zsh` removes duplicate commands from `~/.zsh_history`, keeping the latest of each.
   - The bookmark updater follows redirects in your Microsoft Edge bookmarks and rewrites links that have moved.
@@ -72,10 +93,12 @@ To install it, or to update an installed copy, run:
 
 It builds Nook, quits any running copy (an unsaved recording still gets its save prompt), replaces `/Applications/Nook.app` and launches it. `./install.sh --uninstall` quits and removes Nook.
 
-On first use, macOS asks for two permissions:
+On first use, macOS asks for these permissions:
 
 - **Automation** — to shut down your Mac at the scheduled time.
 - **Notifications** — for shutdown alerts and break reminders.
+- **Bluetooth** — to list, connect and disconnect your devices.
+- **Screen & System Audio Recording** and **Microphone** — only when you record your screen.
 
 ### Command-line tools
 
@@ -98,6 +121,7 @@ Close Edge completely before running the bookmark updater with `-apply`, because
 | `build.sh` | Compiles, bundles and signs `Nook.app` |
 | `install.sh` | Builds and reinstalls Nook in `/Applications` (`--uninstall` removes it) |
 | `icon/` | App icon and the script that draws it (`swift icon/make-icon.swift`) |
+| `screenshots/` | Images of the island used in this README |
 | `clean-zsh/` | Zsh history cleaner |
 | `main.go` | Edge bookmark updater |
 
@@ -108,6 +132,8 @@ Close Edge completely before running the bookmark updater with `-apply`, because
 - [x] Add scheduled power-off functionality
 - [ ] Bring the cleanup utilities into the app
 - [x] Add a menu bar interface for quick access
+- [x] Add screen recording and Bluetooth devices
+- [x] Show system status (CPU, GPU, memory, battery, network, disk, power)
 - [ ] Support configurable preferences
 - [ ] Expand the collection of utilities over time
 

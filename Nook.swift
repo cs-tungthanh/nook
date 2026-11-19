@@ -7,30 +7,50 @@ import CoreImage
 import UniformTypeIdentifiers
 import IOBluetooth
 import CoreBluetooth
+import IOKit
+import IOKit.ps
 
 // MARK: - Constants
 
 private enum Constants {
     enum UI {
-        static let popoverWidth: CGFloat = 320
+        static let panelWidth: CGFloat = 700
+        static let gridSpacing: CGFloat = 12
+        static let gridPadding: CGFloat = 16
+        static let tileCornerRadius: CGFloat = 16
     }
 
-    enum Break {
+    enum Island {
+        /// Outward flares where the island meets the menu bar
+        static let flareRadius: CGFloat = 12
+        static let collapsedFlareRadius: CGFloat = 6
+        static let cornerRadius: CGFloat = 30
+        /// Used on screens without a notch
+        static let fallbackNotchWidth: CGFloat = 180
+        /// Room around the island for its shadow
+        static let shadowMargin: CGFloat = 32
+        static let closeDuration: TimeInterval = 0.4
+        static let escapeKeyCode: UInt16 = 53
+    }
+
+    enum Pomodoro {
         static let defaultIntervalMinutes = 20
         static let defaultDurationSeconds = 120
         static let durationOptions = [120, 300, 600, 1200]
         static let minIntervalMinutes = 1
         static let maxIntervalMinutes = 180
         static let snoozeMinutes = 5
-        static let notificationID = "break-reminder"
-        static let categoryID = "BREAK_REMINDER"
+        static let notificationID = "pomodoro-break"
+        static let categoryID = "POMODORO_BREAK"
 
         enum Action {
-            static let start = "BREAK_START"
-            static let snooze = "BREAK_SNOOZE"
-            static let skip = "BREAK_SKIP"
+            static let start = "POMODORO_START"
+            static let snooze = "POMODORO_SNOOZE"
+            static let skip = "POMODORO_SKIP"
         }
 
+        /// Keys keep the old "breakReminder" names so saved settings carry over
+        /// Keep the old "breakReminder" names so saved settings carry over
         enum Keys {
             static let enabled = "breakReminder.enabled"
             static let intervalMinutes = "breakReminder.intervalMinutes"
@@ -57,9 +77,12 @@ private enum Constants {
 
     enum Shutdown {
         static let defaultMinutes = 30
-        static let presetMinutes = [30, 40, 60]
-        static let minMinutes = 1
-        static let maxMinutes = 600
+        /// The ruler offers 5 min to 2 h in 5-minute ticks, labeled every 30 min
+        static let minMinutes = 5
+        static let maxMinutes = 120
+        static let stepMinutes = 5
+        static let labelEveryMinutes = 30
+        static let tint = Color(red: 1.0, green: 0.66, blue: 0.2)
     }
 
     enum Stepper {
@@ -84,6 +107,7 @@ private enum Constants {
         static let minAreaSize: CGFloat = 32
         static let privacySettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
 
+        /// Keys keep the old "breakReminder" names so saved settings carry over
         enum Keys {
             static let systemAudio = "screenRecording.systemAudio"
             static let microphone = "screenRecording.microphone"
@@ -97,8 +121,15 @@ private enum Constants {
         static let collapsedCount = 4
         static let settingsURL = "x-apple.systempreferences:com.apple.BluetoothSettings"
         static let privacySettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth"
-        /// Grace period before re-reading state after a disconnect or forget
+        /// Grace period before re-reading state after a disconnect
         static let refreshDelay: TimeInterval = 1
+    }
+
+    enum System {
+        /// How often the System page re-reads its stats while it's on screen
+        static let sampleInterval: TimeInterval = 1.5
+        /// Usage above this turns a meter orange
+        static let highUsage = 0.85
     }
 }
 
@@ -154,18 +185,18 @@ private enum Notifier {
         }
     }
 
-    static func registerBreakCategory() {
+    static func registerPomodoroCategory() {
         let actions = [
-            UNNotificationAction(identifier: Constants.Break.Action.start, title: "Start break", options: []),
-            UNNotificationAction(identifier: Constants.Break.Action.snooze, title: "Snooze \(Constants.Break.snoozeMinutes)m", options: []),
-            UNNotificationAction(identifier: Constants.Break.Action.skip, title: "Skip", options: [])
+            UNNotificationAction(identifier: Constants.Pomodoro.Action.start, title: "Start break", options: []),
+            UNNotificationAction(identifier: Constants.Pomodoro.Action.snooze, title: "Snooze \(Constants.Pomodoro.snoozeMinutes)m", options: []),
+            UNNotificationAction(identifier: Constants.Pomodoro.Action.skip, title: "Skip", options: [])
         ]
-        let category = UNNotificationCategory(identifier: Constants.Break.categoryID, actions: actions, intentIdentifiers: [], options: [])
+        let category = UNNotificationCategory(identifier: Constants.Pomodoro.categoryID, actions: actions, intentIdentifiers: [], options: [])
         UNUserNotificationCenter.current().setNotificationCategories([category])
     }
 }
 
-// MARK: - Break Reminder
+// MARK: - Pomodoro
 
 enum BreakMode: String, CaseIterable, Identifiable {
     case notification
@@ -181,12 +212,33 @@ enum BreakMode: String, CaseIterable, Identifiable {
     }
 }
 
-final class BreakReminder: ObservableObject {
+final class Pomodoro: ObservableObject {
     enum Phase: Equatable {
         case off
-        case working(nextBreak: Date)
+        case focusing(endsAt: Date, duration: TimeInterval)
         case onBreak(endsAt: Date, duration: TimeInterval)
         case paused
+    }
+
+    /// Time left in the current focus or break, nil when neither is running.
+    var timeRemaining: TimeInterval? {
+        switch phase {
+        case .focusing(let endsAt, _), .onBreak(let endsAt, _):
+            return max(0, endsAt.timeIntervalSinceNow)
+        case .off, .paused:
+            return nil
+        }
+    }
+
+    /// Share of the current focus or break still left, from 1 down to 0.
+    var progress: Double {
+        switch phase {
+        case .focusing(let endsAt, let duration), .onBreak(let endsAt, let duration):
+            guard duration > 0 else { return 0 }
+            return max(0, min(1, endsAt.timeIntervalSinceNow / duration))
+        case .off, .paused:
+            return 0
+        }
     }
 
     @Published private(set) var phase: Phase = .off {
@@ -195,24 +247,24 @@ final class BreakReminder: ObservableObject {
 
     @Published var isEnabled: Bool {
         didSet {
-            defaults.set(isEnabled, forKey: Constants.Break.Keys.enabled)
+            defaults.set(isEnabled, forKey: Constants.Pomodoro.Keys.enabled)
             isEnabled ? startCycle() : stop()
         }
     }
 
     @Published var intervalMinutes: Int {
         didSet {
-            defaults.set(intervalMinutes, forKey: Constants.Break.Keys.intervalMinutes)
-            if case .working = phase { startCycle() }
+            defaults.set(intervalMinutes, forKey: Constants.Pomodoro.Keys.intervalMinutes)
+            if case .focusing = phase { startCycle() }
         }
     }
 
     @Published var durationSeconds: Int {
-        didSet { defaults.set(durationSeconds, forKey: Constants.Break.Keys.durationSeconds) }
+        didSet { defaults.set(durationSeconds, forKey: Constants.Pomodoro.Keys.durationSeconds) }
     }
 
     @Published var mode: BreakMode {
-        didSet { defaults.set(mode.rawValue, forKey: Constants.Break.Keys.mode) }
+        didSet { defaults.set(mode.rawValue, forKey: Constants.Pomodoro.Keys.mode) }
     }
 
     /// Called on every phase change so the menu bar can refresh.
@@ -226,31 +278,26 @@ final class BreakReminder: ObservableObject {
 
     init() {
         defaults.register(defaults: [
-            Constants.Break.Keys.enabled: false,
-            Constants.Break.Keys.intervalMinutes: Constants.Break.defaultIntervalMinutes,
-            Constants.Break.Keys.durationSeconds: Constants.Break.defaultDurationSeconds,
-            Constants.Break.Keys.mode: BreakMode.notification.rawValue
+            Constants.Pomodoro.Keys.enabled: false,
+            Constants.Pomodoro.Keys.intervalMinutes: Constants.Pomodoro.defaultIntervalMinutes,
+            Constants.Pomodoro.Keys.durationSeconds: Constants.Pomodoro.defaultDurationSeconds,
+            Constants.Pomodoro.Keys.mode: BreakMode.notification.rawValue
         ])
-        isEnabled = defaults.bool(forKey: Constants.Break.Keys.enabled)
-        intervalMinutes = defaults.integer(forKey: Constants.Break.Keys.intervalMinutes)
-        let storedDuration = defaults.integer(forKey: Constants.Break.Keys.durationSeconds)
-        durationSeconds = Constants.Break.durationOptions.contains(storedDuration)
+        isEnabled = defaults.bool(forKey: Constants.Pomodoro.Keys.enabled)
+        intervalMinutes = defaults.integer(forKey: Constants.Pomodoro.Keys.intervalMinutes)
+        let storedDuration = defaults.integer(forKey: Constants.Pomodoro.Keys.durationSeconds)
+        durationSeconds = Constants.Pomodoro.durationOptions.contains(storedDuration)
             ? storedDuration
-            : Constants.Break.defaultDurationSeconds
-        mode = BreakMode(rawValue: defaults.string(forKey: Constants.Break.Keys.mode) ?? "") ?? .notification
+            : Constants.Pomodoro.defaultDurationSeconds
+        mode = BreakMode(rawValue: defaults.string(forKey: Constants.Pomodoro.Keys.mode) ?? "") ?? .notification
 
         observeSystemEvents()
         if isEnabled { startCycle() }
     }
 
-    var breakTimeRemaining: TimeInterval? {
-        guard case .onBreak(let endsAt, _) = phase else { return nil }
-        return max(0, endsAt.timeIntervalSinceNow)
-    }
-
-    var breakProgress: Double {
-        guard case .onBreak(let endsAt, let duration) = phase, duration > 0 else { return 0 }
-        return max(0, min(1, endsAt.timeIntervalSinceNow / duration))
+    var isOnBreak: Bool {
+        if case .onBreak = phase { return true }
+        return false
     }
 
     static func durationText(_ seconds: Int) -> String {
@@ -270,7 +317,7 @@ final class BreakReminder: ObservableObject {
         let duration = TimeInterval(durationSeconds)
         phase = .onBreak(endsAt: Date().addingTimeInterval(duration), duration: duration)
         if mode == .overlay {
-            overlay.show(reminder: self)
+            overlay.show(pomodoro: self)
         }
     }
 
@@ -281,8 +328,8 @@ final class BreakReminder: ObservableObject {
 
     func snooze() {
         overlay.hide()
-        let snoozeInterval = TimeInterval(Constants.Break.snoozeMinutes * Constants.Time.secondsPerMinute)
-        phase = .working(nextBreak: Date().addingTimeInterval(snoozeInterval))
+        let snoozeInterval = TimeInterval(Constants.Pomodoro.snoozeMinutes * Constants.Time.secondsPerMinute)
+        phase = .focusing(endsAt: Date().addingTimeInterval(snoozeInterval), duration: snoozeInterval)
     }
 
     // MARK: Cycle
@@ -295,7 +342,7 @@ final class BreakReminder: ObservableObject {
             return
         }
         let interval = TimeInterval(intervalMinutes * Constants.Time.secondsPerMinute)
-        phase = .working(nextBreak: Date().addingTimeInterval(interval))
+        phase = .focusing(endsAt: Date().addingTimeInterval(interval), duration: interval)
     }
 
     private func stop() {
@@ -303,7 +350,7 @@ final class BreakReminder: ObservableObject {
         tickTimer = nil
         overlay.hide()
         phase = .off
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [Constants.Break.notificationID])
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [Constants.Pomodoro.notificationID])
     }
 
     private func startTicking() {
@@ -318,7 +365,7 @@ final class BreakReminder: ObservableObject {
     private func tick() {
         let now = Date()
         switch phase {
-        case .working(let nextBreak) where now >= nextBreak:
+        case .focusing(let endsAt, _) where now >= endsAt:
             breakDue()
         case .onBreak(let endsAt, _) where now >= endsAt:
             finishBreak()
@@ -331,10 +378,10 @@ final class BreakReminder: ObservableObject {
         switch mode {
         case .notification:
             Notifier.post(
-                title: "Break time ☕",
+                title: "Break time 🍅",
                 body: "Let's relax for \(Self.durationText(durationSeconds)) — look away, stretch, breathe.",
-                identifier: Constants.Break.notificationID,
-                category: Constants.Break.categoryID
+                identifier: Constants.Pomodoro.notificationID,
+                category: Constants.Pomodoro.categoryID
             )
             // Start the next cycle right away so ignored reminders don't pile up
             startCycle()
@@ -345,7 +392,7 @@ final class BreakReminder: ObservableObject {
 
     private func finishBreak() {
         if mode == .notification {
-            Notifier.post(title: "Break over", body: "Welcome back! Next break in \(intervalMinutes) min.")
+            Notifier.post(title: "Break over", body: "Back to focus. Next break in \(intervalMinutes) min.")
         } else {
             NSSound(named: "Glass")?.play()
         }
@@ -398,7 +445,7 @@ private final class BreakOverlayWindow: NSWindow {
 final class BreakOverlayController {
     private var windows: [NSWindow] = []
 
-    func show(reminder: BreakReminder) {
+    func show(pomodoro: Pomodoro) {
         hide()
         windows = NSScreen.screens.map { screen in
             let window = BreakOverlayWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -408,7 +455,7 @@ final class BreakOverlayController {
             window.backgroundColor = .clear
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: BreakOverlayView(reminder: reminder))
+            window.contentView = NSHostingView(rootView: BreakOverlayView(pomodoro: pomodoro))
             window.setFrame(screen.frame, display: true)
             window.orderFrontRegardless()
             return window
@@ -715,7 +762,7 @@ final class ScreenRecorder: NSObject, ObservableObject {
         let chosen = chooseDisplays(from: content.displays, area: area)
         guard !chosen.isEmpty else { throw RecorderError.noDisplay }
 
-        // Leave Nook's own popover and overlays out of the video
+        // Leave Nook's own island and overlays out of the video
         let nook = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
         let filters = chosen.map { SCContentFilter(display: $0, excludingApplications: nook, exceptingWindows: []) }
         let pixelSizes = filters.map { filter -> CGSize in
@@ -1423,10 +1470,10 @@ struct BluetoothDeviceInfo: Identifiable, Equatable {
     let battery: String?
 }
 
-/// Lists paired Bluetooth devices and connects, disconnects or forgets them.
+/// Lists paired Bluetooth devices and connects or disconnects them.
 /// Uses IOBluetooth for the devices and CoreBluetooth only for the power and
-/// permission state. Battery levels and "forget" rely on undocumented
-/// IOBluetoothDevice selectors, so both are checked before use.
+/// permission state. Battery levels rely on undocumented IOBluetoothDevice
+/// selectors, so they're checked before use.
 final class BluetoothManager: NSObject, ObservableObject {
     enum Availability: Equatable {
         case loading
@@ -1439,11 +1486,9 @@ final class BluetoothManager: NSObject, ObservableObject {
     @Published private(set) var devices: [BluetoothDeviceInfo] = []
     @Published private(set) var busyDevices: Set<String> = []
     @Published private(set) var errorMessage: String?
-    /// True when the error is fixed in Bluetooth Settings, so the popover offers a button
-    @Published private(set) var needsBluetoothSettings = false
 
     /// Created on first use so the Bluetooth permission prompt only appears
-    /// once the user opens the popover, not at launch
+    /// once the user opens the island, not at launch
     private var central: CBCentralManager?
     private var connectNotification: IOBluetoothUserNotification?
     private var disconnectNotifications: [String: IOBluetoothUserNotification] = [:]
@@ -1478,13 +1523,13 @@ final class BluetoothManager: NSObject, ObservableObject {
         case .poweredOff:
             setUnavailable(.poweredOff)
         case .poweredOn:
-            // Publishing re-renders the whole popover, so skip it when nothing changed
+            // Publishing re-renders the whole island, so skip it when nothing changed
             if availability != .ready { availability = .ready }
             watchConnections()
             refreshGeneration += 1
             let generation = refreshGeneration
             // Each IOBluetooth property read is a round trip to bluetoothd; doing
-            // them on the main thread held up the popover every time it opened
+            // them on the main thread held up the island every time it opened
             reportQueue.async { [weak self] in
                 let paired = ((IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []).map(Self.info)
                 let report = SystemBluetoothReport.load()
@@ -1509,7 +1554,6 @@ final class BluetoothManager: NSObject, ObservableObject {
     func toggleConnection(_ info: BluetoothDeviceInfo) {
         guard !busyDevices.contains(info.id), let device = IOBluetoothDevice(addressString: info.id) else { return }
         errorMessage = nil
-        needsBluetoothSettings = false
         busyDevices.insert(info.id)
 
         if device.isConnected() {
@@ -1528,36 +1572,6 @@ final class BluetoothManager: NSObject, ObservableObject {
             if status != kIOReturnSuccess {
                 busyDevices.remove(info.id)
                 errorMessage = "Couldn't connect to \(info.name)"
-            }
-        }
-    }
-
-    func forget(_ info: BluetoothDeviceInfo) {
-        let remove = NSSelectorFromString("remove")
-        guard let device = IOBluetoothDevice(addressString: info.id), device.responds(to: remove) else {
-            errorMessage = "Forget isn't supported on this macOS — use Bluetooth Settings"
-            needsBluetoothSettings = true
-            return
-        }
-        errorMessage = nil
-        needsBluetoothSettings = false
-        if device.isConnected() {
-            device.closeConnection()
-        }
-        _ = device.perform(remove)
-        // `remove` is undocumented and recent macOS can ignore it without any
-        // error, so check the system's own list to see whether it really worked
-        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.Bluetooth.refreshDelay) { [weak self] in
-            self?.reportQueue.async {
-                let stillPaired = SystemBluetoothReport.load()[SystemBluetoothReport.normalize(info.id)] != nil
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    if stillPaired {
-                        self.errorMessage = "macOS didn't let Nook forget \(info.name) — forget it in Bluetooth Settings"
-                        self.needsBluetoothSettings = true
-                    }
-                    self.refresh()
-                }
             }
         }
     }
@@ -1766,6 +1780,214 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 }
 
+// MARK: - System Monitor
+
+/// One reading of the Mac's vital signs. `nil` means unknown or not present
+/// (no battery on a desktop, no GPU statistics, or the first sample).
+struct SystemStats {
+    var cpu: Double?
+    var gpu: Double?
+    var memoryUsed: UInt64 = 0
+    var memoryTotal: UInt64 = ProcessInfo.processInfo.physicalMemory
+    var battery: BatteryStatus?
+    var download: Double?
+    var upload: Double?
+    var diskAvailable: Int64?
+    var diskTotal: Int64?
+    /// What the whole Mac draws right now, in watts
+    var systemPower: Double?
+    /// The connected power adapter's rating, in watts
+    var adapterWatts: Int?
+
+    var memory: Double? {
+        memoryTotal > 0 ? Double(memoryUsed) / Double(memoryTotal) : nil
+    }
+
+    struct BatteryStatus {
+        var level: Double
+        var isCharging: Bool
+        var isOnAC: Bool
+    }
+}
+
+/// Samples CPU, GPU, memory, battery, network, disk and power while the
+/// System page is open. It reads counters, so rates (CPU, network) appear
+/// from the second sample on.
+final class SystemMonitor: ObservableObject {
+    @Published private(set) var stats = SystemStats()
+
+    /// The island is open
+    var isIslandShown = false { didSet { updateTimer() } }
+    /// The System page is the one showing
+    var isPageShown = false { didSet { updateTimer() } }
+
+    private var timer: Timer?
+    private let queue = DispatchQueue(label: "nook.system-monitor", qos: .utility)
+    // Only touched on `queue`
+    private var lastCPUTicks: (busy: UInt64, total: UInt64)?
+    private var lastNetwork: (received: UInt64, sent: UInt64, at: Date)?
+
+    private func updateTimer() {
+        let shouldRun = isIslandShown && isPageShown
+        guard shouldRun != (timer != nil) else { return }
+        if shouldRun {
+            sample()
+            let timer = Timer(timeInterval: Constants.System.sampleInterval, repeats: true) { [weak self] _ in
+                self?.sample()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    private func sample() {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            var stats = SystemStats()
+            stats.cpu = self.readCPU()
+            stats.gpu = Self.readGPU()
+            stats.memoryUsed = Self.readMemoryUsed()
+            stats.battery = Self.readBattery()
+            (stats.download, stats.upload) = self.readNetwork()
+            (stats.diskAvailable, stats.diskTotal) = Self.readDisk()
+            (stats.systemPower, stats.adapterWatts) = Self.readPower(isOnAC: stats.battery?.isOnAC ?? true)
+            DispatchQueue.main.async {
+                self.stats = stats
+            }
+        }
+    }
+
+    // MARK: Readers
+
+    /// Busy share of all cores since the last sample
+    private func readCPU() -> Double? {
+        var load = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &load) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        let user = UInt64(load.cpu_ticks.0), system = UInt64(load.cpu_ticks.1)
+        let idle = UInt64(load.cpu_ticks.2), nice = UInt64(load.cpu_ticks.3)
+        let ticks = (busy: user + system + nice, total: user + system + nice + idle)
+        defer { lastCPUTicks = ticks }
+        guard let last = lastCPUTicks, ticks.total > last.total else { return nil }
+        return Double(ticks.busy - last.busy) / Double(ticks.total - last.total)
+    }
+
+    /// The GPU driver's own utilization figure, as Activity Monitor shows it
+    private static func readGPU() -> Double? {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &iterator) == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(iterator) }
+        var utilization: Double?
+        while case let entry = IOIteratorNext(iterator), entry != 0 {
+            defer { IOObjectRelease(entry) }
+            guard let stats = IORegistryEntryCreateCFProperty(entry, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? [String: Any],
+                  let percent = (stats["Device Utilization %"] as? NSNumber)?.doubleValue else { continue }
+            utilization = max(utilization ?? 0, percent / 100)
+        }
+        return utilization
+    }
+
+    /// App memory, wired and compressed, like "Memory Used" in Activity Monitor
+    private static func readMemoryUsed() -> UInt64 {
+        var info = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        let appPages = UInt64(info.internal_page_count) - min(UInt64(info.internal_page_count), UInt64(info.purgeable_count))
+        let pages = appPages + UInt64(info.wire_count) + UInt64(info.compressor_page_count)
+        return pages * UInt64(vm_kernel_page_size)
+    }
+
+    private static func readBattery() -> SystemStats.BatteryStatus? {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
+        for source in sources {
+            guard let description = IOPSGetPowerSourceDescription(info, source)?.takeUnretainedValue() as? [String: Any],
+                  description[kIOPSTypeKey] as? String == kIOPSInternalBatteryType,
+                  let current = description[kIOPSCurrentCapacityKey] as? Int,
+                  let maximum = description[kIOPSMaxCapacityKey] as? Int, maximum > 0 else { continue }
+            return SystemStats.BatteryStatus(
+                level: Double(current) / Double(maximum),
+                isCharging: description[kIOPSIsChargingKey] as? Bool ?? false,
+                isOnAC: description[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
+            )
+        }
+        return nil
+    }
+
+    /// Bytes per second in and out across all interfaces except loopback
+    private func readNetwork() -> (Double?, Double?) {
+        var addresses: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addresses) == 0, let first = addresses else { return (nil, nil) }
+        defer { freeifaddrs(addresses) }
+        var received: UInt64 = 0, sent: UInt64 = 0
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let entry = pointer.pointee
+            guard entry.ifa_addr?.pointee.sa_family == UInt8(AF_LINK),
+                  entry.ifa_flags & UInt32(IFF_LOOPBACK) == 0,
+                  let data = entry.ifa_data?.assumingMemoryBound(to: if_data.self) else { continue }
+            received += UInt64(data.pointee.ifi_ibytes)
+            sent += UInt64(data.pointee.ifi_obytes)
+        }
+        let now = Date()
+        defer { lastNetwork = (received, sent, now) }
+        guard let last = lastNetwork else { return (nil, nil) }
+        let seconds = now.timeIntervalSince(last.at)
+        // Counters are 32-bit per interface and wrap; skip the odd sample where they did
+        guard seconds > 0, received >= last.received, sent >= last.sent else { return (nil, nil) }
+        return (Double(received - last.received) / seconds, Double(sent - last.sent) / seconds)
+    }
+
+    private static func readDisk() -> (Int64?, Int64?) {
+        let values = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey
+        ])
+        return (values?.volumeAvailableCapacityForImportantUsage, values?.volumeTotalCapacity.map(Int64.init))
+    }
+
+    /// The Mac's power draw and the adapter's rating, from the battery controller.
+    /// Macs without a battery don't report either.
+    private static func readPower(isOnAC: Bool) -> (Double?, Int?) {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard service != 0 else { return (nil, nil) }
+        defer { IOObjectRelease(service) }
+        var properties: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let battery = properties?.takeRetainedValue() as? [String: Any] else { return (nil, nil) }
+
+        let adapter = battery["AdapterDetails"] as? [String: Any]
+        let adapterWatts = isOnAC ? (adapter?["Watts"] as? NSNumber)?.intValue : nil
+
+        // On power, the telemetry has what the whole system draws (in mW)
+        if isOnAC,
+           let telemetry = battery["PowerTelemetryData"] as? [String: Any],
+           let milliwatts = (telemetry["SystemPowerIn"] as? NSNumber)?.doubleValue, milliwatts > 0 {
+            return (milliwatts / 1000, adapterWatts)
+        }
+        // On battery, it's what the battery gives out: volts × amps.
+        // Amperage is signed but may come back as its unsigned bit pattern.
+        guard let millivolts = (battery["Voltage"] as? NSNumber)?.doubleValue,
+              let rawAmperage = (battery["InstantAmperage"] as? NSNumber ?? battery["Amperage"] as? NSNumber)?.uint64Value else {
+            return (nil, adapterWatts)
+        }
+        let milliamps = Double(Int64(bitPattern: rawAmperage))
+        return (abs(millivolts * milliamps) / 1_000_000, adapterWatts)
+    }
+}
+
 // MARK: - Nook Glyph
 
 /// Nook's mark: an arched alcove with a dot inside. Drawn as a template image
@@ -1840,23 +2062,25 @@ struct NookApp: App {
 
 class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var statusItem: NSStatusItem!
-    var popover: NSPopover!
+    var island: IslandController!
     var timer: Timer?
     @Published var shutdownDate: Date?
     var highlightView: NSView?
     private var outsideClickMonitor: Any?
+    private var escapeMonitor: Any?
     /// A separate menu bar button, shown only while recording, that stops it in one click
     private var stopRecordingItem: NSStatusItem?
     private var stopRecordingTimer: Timer?
-    let breakReminder = BreakReminder()
+    let pomodoro = Pomodoro()
     let screenRecorder = ScreenRecorder()
     let bluetooth = BluetoothManager()
+    let systemMonitor = SystemMonitor()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestNotificationPermissions()
         setupStatusBar()
-        setupPopover()
-        breakReminder.onChange = { [weak self] in
+        setupIsland()
+        pomodoro.onChange = { [weak self] in
             self?.updateStatusItem()
         }
         screenRecorder.onChange = { [weak self] in
@@ -1868,34 +2092,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Quitting would lose an unsaved recording, so offer to save it first
         guard screenRecorder.hasUnsavedRecording else { return .terminateNow }
-        screenRecorder.save {
-            NSApp.reply(toApplicationShouldTerminate: true)
+        afterClosingIsland { [weak self] in
+            self?.screenRecorder.save {
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
         }
         return .terminateLater
     }
 
     func startRecording() {
-        // Close the popover so it isn't in the way of what's being recorded
-        popover.performClose(nil)
+        // Close the island so it isn't in the way of what's being recorded
+        closeIsland()
         screenRecorder.start()
     }
 
     func resumeRecording() {
-        popover.performClose(nil)
+        closeIsland()
         screenRecorder.resume()
     }
 
     func saveRecording() {
-        popover.performClose(nil)
-        screenRecorder.save()
+        afterClosingIsland { [weak self] in
+            self?.screenRecorder.save()
+        }
     }
 
-    /// Stops the recording from the menu bar, then opens the popover so the
+    func discardRecording() {
+        afterClosingIsland { [weak self] in
+            self?.screenRecorder.discard()
+        }
+    }
+
+    /// Stops the recording from the menu bar, then opens the island so the
     /// user can resume, save or discard it.
     @objc private func stopRecordingFromMenuBar() {
         screenRecorder.pause { [weak self] in
-            guard let self = self, self.screenRecorder.isPaused, !self.popover.isShown else { return }
-            self.togglePopover()
+            guard let self = self, self.screenRecorder.isPaused, !self.island.isShown else { return }
+            self.toggleIsland()
         }
     }
 
@@ -1944,7 +2177,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func requestNotificationPermissions() {
         UNUserNotificationCenter.current().delegate = self
-        Notifier.registerBreakCategory()
+        Notifier.registerPomodoroCategory()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error = error {
                 NSLog("Nook: notification authorization failed: \(error.localizedDescription)")
@@ -1959,48 +2192,80 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         guard let button = statusItem.button else { return }
         button.image = NookGlyph.image
-        button.action = #selector(togglePopover)
+        button.action = #selector(toggleIsland)
         button.target = self
     }
 
-    private func setupPopover() {
-        popover = NSPopover()
-        popover.behavior = .transient
-        // The grow-and-fade animation adds about 0.2s before the content is usable
-        popover.animates = false
-        popover.delegate = self
-
-        // Let the popover follow the SwiftUI height as the break reminder card expands
-        let hostingController = NSHostingController(rootView: ContentView(appDelegate: self, breakReminder: breakReminder, screenRecorder: screenRecorder, bluetooth: bluetooth))
-        hostingController.sizingOptions = .preferredContentSize
-        popover.contentViewController = hostingController
-        // Build and lay out the SwiftUI tree now so the first click doesn't pay for it
-        _ = hostingController.view.fittingSize
-    }
-
-    @objc func togglePopover() {
-        if let button = statusItem.button {
-            if popover.isShown {
-                popover.performClose(nil)
-                removeHighlight()
-            } else {
-                // A menu-bar-only app isn't active by default, so the transient
-                // popover's window never becomes key and outside clicks don't close it
-                NSApp.activate(ignoringOtherApps: true)
-                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-                popover.contentViewController?.view.window?.makeKey()
-                addHighlight()
-                startOutsideClickMonitor()
-            }
+    private func setupIsland() {
+        island = IslandController(content: ContentView(appDelegate: self, pomodoro: pomodoro, screenRecorder: screenRecorder, bluetooth: bluetooth, system: systemMonitor))
+        island.onDismiss = { [weak self] in
+            self?.closeIsland()
         }
     }
 
-    // Fallback for clicks in other apps, which a transient popover can miss
+    @objc func toggleIsland() {
+        if island.isShown {
+            closeIsland()
+            return
+        }
+        guard let screen = statusItem.button?.window?.screen ?? NSScreen.main else { return }
+        // A menu-bar-only app isn't active by default, so activate it for the
+        // island to take key presses (Esc closes it)
+        NSApp.activate(ignoringOtherApps: true)
+        island.show(on: screen)
+        systemMonitor.isIslandShown = true
+        addHighlight()
+        startOutsideClickMonitor()
+        startEscapeMonitor()
+        // Battery levels and connections change while the island is closed.
+        // Refresh once it's opening so the work never delays it appearing.
+        DispatchQueue.main.async { [weak self] in
+            self?.bluetooth.refresh()
+        }
+    }
+
+    /// Closes the island, then runs `action` once it has folded away. The
+    /// island floats at the menu bar's level, above alerts and save panels,
+    /// so anything `action` opens would otherwise appear behind it.
+    func afterClosingIsland(_ action: @escaping () -> Void) {
+        guard island.isShown else {
+            action()
+            return
+        }
+        closeIsland()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.Island.closeDuration, execute: action)
+    }
+
+    func closeIsland() {
+        guard island.isShown else { return }
+        island.hide()
+        systemMonitor.isIslandShown = false
+        removeHighlight()
+        stopOutsideClickMonitor()
+        stopEscapeMonitor()
+    }
+
+    // Clicks in other apps close the island; clicks on the menu bar icon toggle it
     private func startOutsideClickMonitor() {
         stopOutsideClickMonitor()
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            guard let self = self, self.popover.isShown else { return }
-            self.popover.performClose(nil)
+            self?.closeIsland()
+        }
+    }
+
+    private func startEscapeMonitor() {
+        stopEscapeMonitor()
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == Constants.Island.escapeKeyCode else { return event }
+            self?.closeIsland()
+            return nil
+        }
+    }
+
+    private func stopEscapeMonitor() {
+        if let monitor = escapeMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeMonitor = nil
         }
     }
 
@@ -2023,7 +2288,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         let highlight = NSView(frame: NSRect(x: x, y: y, width: width, height: height))
         highlight.wantsLayer = true
-        // Follow the button if its size changes while the popover is open
+        // Follow the button if its size changes while the island is open
         highlight.autoresizingMask = [.width, .minYMargin, .maxYMargin]
 
         configureHighlightLayer(highlight.layer)
@@ -2105,7 +2370,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func updateStatusItem() {
         // Icon only, so the item stays the same size as other menu bar icons;
-        // the countdowns live in the popover
+        // the countdowns live in the island
         guard let button = statusItem.button else { return }
         let image: NSImage?
         if screenRecorder.isRecording {
@@ -2113,7 +2378,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             image = StatusIcon.recording
         } else if screenRecorder.isPaused {
             image = StatusIcon.recordingPaused
-        } else if breakReminder.breakTimeRemaining != nil {
+        } else if pomodoro.isOnBreak {
             // Break state takes priority while a break is running
             image = StatusIcon.onBreak
         } else if shutdownDate != nil {
@@ -2138,23 +2403,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 }
 
-// MARK: - NSPopoverDelegate
-extension AppDelegate: NSPopoverDelegate {
-    func popoverDidShow(_ notification: Notification) {
-        // Battery levels and connections change while the popover is closed.
-        // Refresh once it's on screen so the work never delays it appearing.
-        bluetooth.refresh()
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        // Remove highlight and the outside-click monitor when popover closes
-        DispatchQueue.main.async { [weak self] in
-            self?.removeHighlight()
-            self?.stopOutsideClickMonitor()
-        }
-    }
-}
-
 // MARK: - UNUserNotificationCenterDelegate
 extension AppDelegate: UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -2164,14 +2412,14 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let action = response.actionIdentifier
         DispatchQueue.main.async { [weak self] in
-            guard let breakReminder = self?.breakReminder else { return }
+            guard let pomodoro = self?.pomodoro else { return }
             switch action {
-            case Constants.Break.Action.start:
-                breakReminder.startBreak()
-            case Constants.Break.Action.snooze:
-                breakReminder.snooze()
-            case Constants.Break.Action.skip:
-                breakReminder.skipBreak()
+            case Constants.Pomodoro.Action.start:
+                pomodoro.startBreak()
+            case Constants.Pomodoro.Action.snooze:
+                pomodoro.snooze()
+            case Constants.Pomodoro.Action.skip:
+                pomodoro.skipBreak()
             default:
                 break
             }
@@ -2184,52 +2432,83 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
 
 struct ContentView: View {
     @ObservedObject var appDelegate: AppDelegate
-    @ObservedObject var breakReminder: BreakReminder
+    @ObservedObject var pomodoro: Pomodoro
     @ObservedObject var screenRecorder: ScreenRecorder
     @ObservedObject var bluetooth: BluetoothManager
+    @ObservedObject var system: SystemMonitor
     @State private var shutdownMinutes = Constants.Shutdown.defaultMinutes
     @State private var showsAllDevices = false
+    @State private var showsSystem = false
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: Constants.UI.gridSpacing) {
             headerView
-            powerOffView
-            Divider()
-            breakReminderView
-            Divider()
-            screenRecordingView
-            Divider()
-            bluetoothView
-            Divider()
-            footerView
+            if showsSystem {
+                systemView
+            } else {
+                // Two columns of tiles keep the island short enough to fit on screen
+                HStack(alignment: .top, spacing: Constants.UI.gridSpacing) {
+                    VStack(spacing: Constants.UI.gridSpacing) {
+                        tile(pomodoroView)
+                        tile(powerOffView)
+                    }
+                    VStack(spacing: Constants.UI.gridSpacing) {
+                        tile(screenRecordingView)
+                        tile(bluetoothView)
+                    }
+                }
+            }
         }
-        .frame(width: Constants.UI.popoverWidth)
+        .padding(.horizontal, Constants.UI.gridPadding)
+        .padding(.bottom, Constants.UI.gridPadding)
+        .frame(width: Constants.UI.panelWidth)
+    }
+
+    private func tile<Content: View>(_ content: Content) -> some View {
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Constants.UI.tileCornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
     }
 
     private var headerView: some View {
-        HStack {
+        HStack(spacing: 8) {
             Image(nsImage: NookGlyph.image)
                 .renderingMode(.template)
                 .resizable()
-                .frame(width: 22, height: 22)
-            Text("Nook")
+                .frame(width: 20, height: 20)
+            Text(showsSystem ? "System" : "Nook")
                 .font(.headline)
+            Spacer()
+            Button(action: { setShowsSystem(!showsSystem) }) {
+                HStack(spacing: 4) {
+                    Image(systemName: showsSystem ? "square.grid.2x2" : "cpu")
+                    Text(showsSystem ? "Utilities" : "System")
+                }
+                .font(.caption)
+                .foregroundColor(showsSystem ? .primary : .secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.white.opacity(0.1)))
+            }
+            .buttonStyle(CustomPlainButtonStyle())
+            .clipShape(Capsule())
+            Button(action: {
+                NSApplication.shared.terminate(nil)
+            }) {
+                Text("Quit")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+            }
+            .buttonStyle(CustomPlainButtonStyle())
+            .clipShape(Capsule())
         }
-        .padding()
-        .frame(maxWidth: .infinity)
-        .background(Color.accentColor.opacity(0.1))
-    }
-
-    private var footerView: some View {
-        Button(action: {
-            NSApplication.shared.terminate(nil)
-        }) {
-            Text("Quit")
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity)
-                .padding(8)
-        }
-        .buttonStyle(CustomPlainButtonStyle())
+        .padding(.horizontal, 6)
+        .padding(.top, 6)
     }
 
     // MARK: Power Off
@@ -2249,18 +2528,22 @@ struct ContentView: View {
                     )
                 }
             } else {
-                settingRow("After") {
-                    minuteStepper($shutdownMinutes, in: Constants.Shutdown.minMinutes...Constants.Shutdown.maxMinutes)
-                }
-
-                settingRow("Quick") {
-                    Picker("", selection: $shutdownMinutes) {
-                        ForEach(Constants.Shutdown.presetMinutes, id: \.self) { minutes in
-                            Text(shortDurationText(minutes * Constants.Time.secondsPerMinute)).tag(minutes)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                HStack(alignment: .center, spacing: 12) {
+                    TickRuler(
+                        value: $shutdownMinutes,
+                        range: Constants.Shutdown.minMinutes...Constants.Shutdown.maxMinutes,
+                        step: Constants.Shutdown.stepMinutes,
+                        labelEvery: Constants.Shutdown.labelEveryMinutes,
+                        tint: Constants.Shutdown.tint
+                    )
+                    Spacer(minLength: 0)
+                    Text(TimeRemaining(from: TimeInterval(shutdownMinutes * Constants.Time.secondsPerMinute)).clockFormat)
+                        .font(.system(size: 24, weight: .light, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(Constants.Shutdown.tint)
+                        // Shrink rather than wrap once it reaches hours ("2:00:00")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
 
                 TimelineView(.periodic(from: .now, by: Constants.Time.updateInterval)) { _ in
@@ -2283,44 +2566,28 @@ struct ContentView: View {
         return "Shutting down in \(TimeRemaining(from: remaining).longFormat)"
     }
 
-    // MARK: Break Reminder
+    // MARK: Pomodoro
 
-    private var breakReminderView: some View {
+    private var pomodoroView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle(isOn: $breakReminder.isEnabled) {
-                sectionLabel("Break Reminders", systemImage: "cup.and.saucer.fill")
+            // Only the card redraws each second, not the whole island
+            TimelineView(.periodic(from: .now, by: Constants.Time.updateInterval)) { _ in
+                pomodoroCard
             }
-            .toggleStyle(.switch)
-            .controlSize(.small)
 
-            if breakReminder.isEnabled {
-                settingRow("Every") {
-                    minuteStepper($breakReminder.intervalMinutes, in: Constants.Break.minIntervalMinutes...Constants.Break.maxIntervalMinutes)
+            settingRow("Focus") {
+                minuteStepper($pomodoro.intervalMinutes, in: Constants.Pomodoro.minIntervalMinutes...Constants.Pomodoro.maxIntervalMinutes)
+            }
+
+            settingRow("Break") {
+                SegmentedPicker(selection: $pomodoro.durationSeconds, options: Constants.Pomodoro.durationOptions) { seconds in
+                    shortDurationText(seconds)
                 }
+            }
 
-                settingRow("Relax") {
-                    Picker("", selection: $breakReminder.durationSeconds) {
-                        ForEach(Constants.Break.durationOptions, id: \.self) { seconds in
-                            Text(shortDurationText(seconds)).tag(seconds)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-
-                settingRow("Style") {
-                    Picker("", selection: $breakReminder.mode) {
-                        ForEach(BreakMode.allCases) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-
-                // Only the countdown row redraws each second, not the whole popover
-                TimelineView(.periodic(from: .now, by: Constants.Time.updateInterval)) { _ in
-                    breakStatusView
+            settingRow("Style") {
+                SegmentedPicker(selection: $pomodoro.mode, options: Array(BreakMode.allCases)) { mode in
+                    mode.title
                 }
             }
         }
@@ -2328,28 +2595,130 @@ struct ContentView: View {
         .padding(.vertical, 12)
     }
 
-    @ViewBuilder
-    private var breakStatusView: some View {
-        switch breakReminder.phase {
-        case .working(let nextBreak):
-            statusRow(
-                icon: "timer",
-                text: "Next break in \(TimeRemaining(from: max(0, nextBreak.timeIntervalSinceNow)).longFormat)",
-                actionTitle: "Break now",
-                action: breakReminder.startBreak
-            )
-        case .onBreak:
-            statusRow(
-                icon: "cup.and.saucer.fill",
-                text: "On break · \(TimeRemaining(from: breakReminder.breakTimeRemaining ?? 0).clockFormat) left",
-                actionTitle: "End break",
-                action: breakReminder.skipBreak
-            )
-        case .paused:
-            statusRow(icon: "pause.circle", text: "Paused while your Mac is locked or asleep")
-        case .off:
-            EmptyView()
+    private var pomodoroCard: some View {
+        let theme = PomodoroTheme(phase: pomodoro.phase)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Text("🍅")
+                Text("Pomodoro")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                Spacer()
+                if pomodoro.isEnabled {
+                    Button(action: { pomodoro.isEnabled = false }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .frame(width: 20, height: 20)
+                            .background(Circle().fill(Color.white.opacity(0.2)))
+                    }
+                    .buttonStyle(PillButtonStyle())
+                    .hoverTooltip("Turn off Pomodoro")
+                }
+            }
+
+            if pomodoro.isEnabled {
+                pomodoroActiveBody(theme: theme)
+            } else {
+                pomodoroIdleBody(theme: theme)
+            }
         }
+        .foregroundColor(.white)
+        .padding(14)
+        .background(theme.gradient)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: theme.colors[0].opacity(0.35), radius: 8, y: 3)
+    }
+
+    private func pomodoroIdleBody(theme: PomodoroTheme) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Focus in sprints, rest in between.")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("\(pomodoro.intervalMinutes) min focus · \(Pomodoro.durationText(pomodoro.durationSeconds)) break")
+                    .font(.caption)
+                    .opacity(0.85)
+            }
+            pomodoroPill("Start focusing", systemImage: "play.fill", theme: theme, prominent: true) {
+                pomodoro.isEnabled = true
+            }
+        }
+    }
+
+    private func pomodoroActiveBody(theme: PomodoroTheme) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                pomodoroRing(theme: theme)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(theme.label)
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .tracking(1.5)
+                        .opacity(0.85)
+                    Text(pomodoro.timeRemaining.map { TimeRemaining(from: $0).clockFormat } ?? "––:––")
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    Text(pomodoroSubtitle)
+                        .font(.caption)
+                        .opacity(0.85)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+
+            switch pomodoro.phase {
+            case .focusing:
+                pomodoroPill("Break now", systemImage: "cup.and.saucer.fill", theme: theme, prominent: true, action: pomodoro.startBreak)
+            case .onBreak:
+                HStack(spacing: 8) {
+                    pomodoroPill("Snooze \(Constants.Pomodoro.snoozeMinutes)m", systemImage: "moon.zzz.fill", theme: theme, prominent: false, action: pomodoro.snooze)
+                    pomodoroPill("Back to focus", systemImage: "bolt.fill", theme: theme, prominent: true, action: pomodoro.skipBreak)
+                }
+            case .paused, .off:
+                EmptyView()
+            }
+        }
+    }
+
+    private var pomodoroSubtitle: String {
+        switch pomodoro.phase {
+        case .focusing:
+            return "then a \(Pomodoro.durationText(pomodoro.durationSeconds)) break"
+        case .onBreak:
+            return "Look away, stretch, breathe"
+        case .paused:
+            return "While your Mac is locked or asleep"
+        case .off:
+            return ""
+        }
+    }
+
+    private func pomodoroRing(theme: PomodoroTheme) -> some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.25), lineWidth: 5)
+            Circle()
+                .trim(from: 0, to: pomodoro.progress)
+                .stroke(Color.white, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: Constants.Time.updateInterval), value: pomodoro.progress)
+            Image(systemName: theme.symbol)
+                .font(.system(size: 18, weight: .semibold))
+        }
+        .frame(width: 58, height: 58)
+    }
+
+    private func pomodoroPill(_ title: String, systemImage: String, theme: PomodoroTheme, prominent: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(prominent ? theme.colors[0] : .white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(Color.white.opacity(prominent ? 0.95 : 0.2)))
+        }
+        .buttonStyle(PillButtonStyle())
     }
 
     // MARK: Screen Recording
@@ -2382,13 +2751,9 @@ struct ContentView: View {
     @ViewBuilder
     private var recordingOptionsView: some View {
         settingRow("Source") {
-            Picker("", selection: $screenRecorder.source) {
-                ForEach(RecordingSource.allCases) { source in
-                    Text(source.title).tag(source)
-                }
+            SegmentedPicker(selection: $screenRecorder.source, options: Array(RecordingSource.allCases)) { source in
+                source.title
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
         }
 
         if screenRecorder.source == .screen, screenRecorder.displays.count > 1 {
@@ -2430,7 +2795,7 @@ struct ContentView: View {
                 actions: [
                     ("Resume", appDelegate.resumeRecording),
                     ("Save", appDelegate.saveRecording),
-                    ("Discard", screenRecorder.discard)
+                    ("Discard", appDelegate.discardRecording)
                 ]
             )
         case .selectingArea:
@@ -2508,12 +2873,7 @@ struct ContentView: View {
             }
 
             if let error = bluetooth.errorMessage {
-                statusRow(
-                    icon: "exclamationmark.triangle",
-                    text: error,
-                    actionTitle: bluetooth.needsBluetoothSettings ? "Settings" : nil,
-                    action: bluetooth.needsBluetoothSettings ? bluetooth.openSettings : nil
-                )
+                statusRow(icon: "exclamationmark.triangle", text: error)
             }
         }
         .padding(.horizontal)
@@ -2583,19 +2943,10 @@ struct ContentView: View {
                 .buttonStyle(CustomPlainButtonStyle())
                 .cornerRadius(5)
             }
-
-            Menu {
-                Button("Forget This Device…") { confirmForget(device) }
-            } label: {
-                Image(systemName: "ellipsis")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(Color.accentColor.opacity(device.isConnected ? 0.08 : 0.03))
+        .background(Color.white.opacity(device.isConnected ? 0.1 : 0.05))
         .cornerRadius(8)
     }
 
@@ -2605,16 +2956,146 @@ struct ContentView: View {
         return "Connected · \(battery)"
     }
 
-    private func confirmForget(_ device: BluetoothDeviceInfo) {
-        let alert = NSAlert()
-        alert.messageText = "Forget \(device.name)?"
-        alert.informativeText = "You'll need to pair it again from Bluetooth Settings to use it with this Mac."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Forget Device")
-        alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
-            bluetooth.forget(device)
+    // MARK: System
+
+    private func setShowsSystem(_ shows: Bool) {
+        showsSystem = shows
+        system.isPageShown = shows
+    }
+
+    private var systemView: some View {
+        let stats = system.stats
+        return VStack(spacing: Constants.UI.gridSpacing) {
+            systemRow {
+                metricTile("CPU", systemImage: "cpu", value: percentText(stats.cpu), fraction: stats.cpu)
+                metricTile("GPU", systemImage: "display", value: percentText(stats.gpu), fraction: stats.gpu)
+                metricTile(
+                    "Memory", systemImage: "memorychip", value: percentText(stats.memory),
+                    detail: "\(byteText(Int64(stats.memoryUsed))) of \(byteText(Int64(stats.memoryTotal)))",
+                    fraction: stats.memory
+                )
+            }
+            systemRow {
+                metricTile(
+                    "Battery", systemImage: batterySymbol(stats.battery),
+                    value: percentText(stats.battery?.level), detail: batteryDetail(stats.battery),
+                    fraction: stats.battery?.level, highIsBad: false
+                )
+                metricTile(
+                    "Network", systemImage: "network",
+                    value: "↓ \(rateText(stats.download))", detail: "↑ \(rateText(stats.upload))"
+                )
+            }
+            systemRow {
+                metricTile(
+                    "Available", systemImage: "internaldrive",
+                    value: stats.diskAvailable.map(byteText) ?? "–",
+                    detail: stats.diskTotal.map { "of \(byteText($0))" },
+                    fraction: diskUsedFraction(stats)
+                )
+                metricTile(
+                    "Power", systemImage: "powerplug",
+                    value: stats.systemPower.map { String(format: "%.0f W", $0) } ?? "–",
+                    detail: stats.adapterWatts.map { "\($0) W adapter" } ?? (stats.battery.map { $0.isOnAC ? "On power" : "On battery" })
+                )
+            }
         }
+    }
+
+    /// Tiles side by side, all as tall as the tallest
+    private func systemRow<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: Constants.UI.gridSpacing) {
+            content()
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func metricTile(
+        _ title: String, systemImage: String, value: String, detail: String? = nil,
+        fraction: Double? = nil, highIsBad: Bool = true
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.secondary)
+
+            Text(value)
+                .font(.system(size: 28, weight: .medium, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+
+            if let detail = detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            if let fraction = fraction {
+                usageBar(fraction, color: highIsBad && fraction > Constants.System.highUsage ? .orange : .white)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: Constants.UI.tileCornerRadius, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+    }
+
+    private func usageBar(_ fraction: Double, color: Color) -> some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.12))
+                Capsule()
+                    .fill(color)
+                    .frame(width: proxy.size.width * min(max(fraction, 0), 1))
+                    .animation(.easeOut(duration: 0.4), value: fraction)
+            }
+        }
+        .frame(height: 5)
+    }
+
+    private func percentText(_ fraction: Double?) -> String {
+        fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "–"
+    }
+
+    private func byteText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private func rateText(_ bytesPerSecond: Double?) -> String {
+        bytesPerSecond.map { "\(byteText(Int64($0)))/s" } ?? "–"
+    }
+
+    private func batterySymbol(_ battery: SystemStats.BatteryStatus?) -> String {
+        guard let battery = battery else { return "battery.0" }
+        if battery.isCharging { return "battery.100.bolt" }
+        switch battery.level {
+        case 0.75...: return "battery.100"
+        case 0.5..<0.75: return "battery.75"
+        case 0.25..<0.5: return "battery.50"
+        case 0.1..<0.25: return "battery.25"
+        default: return "battery.0"
+        }
+    }
+
+    private func batteryDetail(_ battery: SystemStats.BatteryStatus?) -> String {
+        guard let battery = battery else { return "No battery" }
+        if battery.isCharging { return "Charging" }
+        return battery.isOnAC ? "On power, not charging" : "On battery"
+    }
+
+    private func diskUsedFraction(_ stats: SystemStats) -> Double? {
+        guard let available = stats.diskAvailable, let total = stats.diskTotal, total > 0 else { return nil }
+        return 1 - Double(available) / Double(total)
     }
 
     // MARK: Shared Rows
@@ -2700,7 +3181,7 @@ struct ContentView: View {
         .font(.caption)
         .foregroundColor(.secondary)
         .padding(8)
-        .background(Color.accentColor.opacity(0.08))
+        .background(Color.white.opacity(0.08))
         .cornerRadius(8)
     }
 
@@ -2814,12 +3295,13 @@ extension View {
 // MARK: - Components
 
 struct BreakOverlayView: View {
-    @ObservedObject var reminder: BreakReminder
+    @ObservedObject var pomodoro: Pomodoro
 
     var body: some View {
         ZStack {
             VisualEffectBackground()
-            Color.black.opacity(0.25)
+            LinearGradient(colors: PomodoroTheme.breakColors, startPoint: .topLeading, endPoint: .bottomTrailing)
+                .opacity(0.55)
 
             VStack(spacing: 28) {
                 Image(systemName: "cup.and.saucer.fill")
@@ -2838,12 +3320,12 @@ struct BreakOverlayView: View {
                 }
 
                 HStack(spacing: 12) {
-                    overlayButton("Snooze \(Constants.Break.snoozeMinutes)m", systemImage: "moon.zzz.fill", action: reminder.snooze)
-                    overlayButton("Skip Break", systemImage: "forward.fill", action: reminder.skipBreak)
+                    overlayButton("Snooze \(Constants.Pomodoro.snoozeMinutes)m", systemImage: "moon.zzz.fill", action: pomodoro.snooze)
+                    overlayButton("Back to focus", systemImage: "bolt.fill", action: pomodoro.skipBreak)
                         .keyboardShortcut(.cancelAction)
                 }
 
-                Text("Press Esc to skip")
+                Text("Press Esc to get back to focus")
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.6))
             }
@@ -2856,11 +3338,11 @@ struct BreakOverlayView: View {
             Circle()
                 .stroke(Color.white.opacity(0.15), lineWidth: 8)
             Circle()
-                .trim(from: 0, to: reminder.breakProgress)
+                .trim(from: 0, to: pomodoro.progress)
                 .stroke(Color.white, style: StrokeStyle(lineWidth: 8, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: Constants.Time.updateInterval), value: reminder.breakProgress)
-            Text(TimeRemaining(from: reminder.breakTimeRemaining ?? 0).clockFormat)
+                .animation(.linear(duration: Constants.Time.updateInterval), value: pomodoro.progress)
+            Text(TimeRemaining(from: pomodoro.timeRemaining ?? 0).clockFormat)
                 .font(.system(size: 48, weight: .bold, design: .monospaced))
         }
         .frame(width: 180, height: 180)
@@ -2882,6 +3364,197 @@ struct BreakOverlayView: View {
     }
 }
 
+/// Colors and labels for each Pomodoro phase: tomato for focus, mint for breaks.
+struct PomodoroTheme {
+    let colors: [Color]
+    let label: String
+    let symbol: String
+
+    static let focusColors = [Color(red: 0.93, green: 0.27, blue: 0.24), Color(red: 0.98, green: 0.55, blue: 0.22)]
+    static let breakColors = [Color(red: 0.07, green: 0.6, blue: 0.5), Color(red: 0.2, green: 0.72, blue: 0.85)]
+    static let pausedColors = [Color(red: 0.4, green: 0.42, blue: 0.55), Color(red: 0.55, green: 0.57, blue: 0.68)]
+
+    init(phase: Pomodoro.Phase) {
+        switch phase {
+        case .focusing:
+            colors = Self.focusColors
+            label = "FOCUS"
+            symbol = "flame.fill"
+        case .onBreak:
+            colors = Self.breakColors
+            label = "BREAK"
+            symbol = "cup.and.saucer.fill"
+        case .paused:
+            colors = Self.pausedColors
+            label = "PAUSED"
+            symbol = "pause.fill"
+        case .off:
+            colors = Self.focusColors
+            label = ""
+            symbol = "flame.fill"
+        }
+    }
+
+    var gradient: LinearGradient {
+        LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+}
+
+/// Brightens on hover and shrinks a little on press, for the Pomodoro card's pills.
+struct PillButtonStyle: ButtonStyle {
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .brightness(isHovered ? 0.06 : 0)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isHovered)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
+            .contentShape(Capsule())
+            .onHover { isHovered = $0 }
+    }
+}
+
+/// A segmented control drawn in SwiftUI. AppKit's segmented control can lose
+/// its segment widths when the island hides it and lays it out again, leaving
+/// one squashed "…" segment, so Nook draws its own.
+struct SegmentedPicker<Value: Hashable>: View {
+    @Binding var selection: Value
+    let options: [Value]
+    let title: (Value) -> String
+    @Namespace private var namespace
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.self) { option in
+                segment(option)
+            }
+        }
+        .padding(2)
+        .background(Capsule().fill(Color.white.opacity(0.08)))
+        .fixedSize()
+    }
+
+    private func segment(_ option: Value) -> some View {
+        let isSelected = option == selection
+        return Button(action: {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                selection = option
+            }
+        }) {
+            Text(title(option))
+                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                .foregroundColor(isSelected ? .white : .secondary)
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background {
+                    if isSelected {
+                        Capsule()
+                            .fill(Color.accentColor)
+                            .matchedGeometryEffect(id: "selection", in: namespace)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Picks a value by clicking or dragging along a ruler of ticks. Ticks up to
+/// the value glow, the rest stay dim, and a pointer sits under the value.
+struct TickRuler: View {
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    let step: Int
+    /// Ticks whose value is a multiple of this get a number above them
+    let labelEvery: Int
+    let tint: Color
+
+    private let tickWidth: CGFloat = 3
+    private let tickGap: CGFloat = 5
+    private let tickHeight: CGFloat = 26
+    private let labelWidth: CGFloat = 28
+    private let pointerSize = CGSize(width: 10, height: 7)
+
+    private var ticks: [Int] {
+        Array(stride(from: range.lowerBound, through: range.upperBound, by: step))
+    }
+
+    private var pitch: CGFloat { tickWidth + tickGap }
+    private var width: CGFloat { CGFloat(ticks.count) * pitch - tickGap }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ZStack(alignment: .leading) {
+                ForEach(Array(ticks.enumerated()), id: \.element) { index, tick in
+                    if tick % labelEvery == 0 {
+                        Text("\(tick)")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .foregroundColor(tint.opacity(tick <= value ? 1 : 0.35))
+                            .frame(width: labelWidth)
+                            .offset(x: center(of: index) - labelWidth / 2)
+                    }
+                }
+            }
+            .frame(width: width, height: 12, alignment: .leading)
+
+            HStack(spacing: tickGap) {
+                ForEach(ticks, id: \.self) { tick in
+                    Capsule()
+                        .fill(tick <= value ? tint : tint.opacity(0.22))
+                        .frame(width: tickWidth, height: tickHeight)
+                }
+            }
+
+            Triangle()
+                .fill(tint)
+                .frame(width: pointerSize.width, height: pointerSize.height)
+                .offset(x: center(of: ticks.firstIndex(of: value) ?? 0) - pointerSize.width / 2)
+                .frame(width: width, alignment: .leading)
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.85), value: value)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+            select(at: drag.location.x)
+        })
+        .accessibilityElement()
+        .accessibilityValue("\(value) minutes")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: value = min(range.upperBound, value + step)
+            case .decrement: value = max(range.lowerBound, value - step)
+            @unknown default: break
+            }
+        }
+    }
+
+    private func center(of index: Int) -> CGFloat {
+        CGFloat(index) * pitch + tickWidth / 2
+    }
+
+    private func select(at x: CGFloat) {
+        let index = Int((x / pitch).rounded(.down))
+        let tick = ticks[max(0, min(ticks.count - 1, index))]
+        guard tick != value else { return }
+        value = tick
+        // A light tick on the trackpad for each step, like a physical dial
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+    }
+}
+
+/// A small triangle pointing up.
+struct Triangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
 struct VisualEffectBackground: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -2893,3 +3566,204 @@ struct VisualEffectBackground: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
+
+// MARK: - Island
+
+/// The outline of the island: flat along the top of the screen with small
+/// outward flares where it meets the menu bar, like the notch, and wide
+/// rounded corners at the bottom.
+struct IslandShape: Shape {
+    var flareRadius: CGFloat
+    var cornerRadius: CGFloat
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(flareRadius, cornerRadius) }
+        set {
+            flareRadius = newValue.first
+            cornerRadius = newValue.second
+        }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let flare = flareRadius
+        let left = rect.minX + flare
+        let right = rect.maxX - flare
+        let corner = max(0, min(cornerRadius, rect.height / 2, (right - left) / 2))
+
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addQuadCurve(to: CGPoint(x: left, y: rect.minY + flare), control: CGPoint(x: left, y: rect.minY))
+        path.addArc(tangent1End: CGPoint(x: left, y: rect.maxY), tangent2End: CGPoint(x: right, y: rect.maxY), radius: corner)
+        path.addArc(tangent1End: CGPoint(x: right, y: rect.maxY), tangent2End: CGPoint(x: right, y: rect.minY), radius: corner)
+        path.addLine(to: CGPoint(x: right, y: rect.minY + flare))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY), control: CGPoint(x: right, y: rect.minY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// What the island looks like right now: collapsed into the notch or open.
+final class IslandModel: ObservableObject {
+    @Published var isExpanded = false
+    /// The notch (or a notch-sized slot in the menu bar) the island grows out of
+    @Published var notchSize = CGSize(width: 180, height: 24)
+}
+
+/// Grows its content out of the notch: a black notch-sized pill springs open
+/// to the content's size while the content fades and un-blurs into place.
+/// Clicking the empty space around it calls `onDismiss`.
+struct IslandView<Content: View>: View {
+    @ObservedObject var model: IslandModel
+    let onDismiss: () -> Void
+    let content: Content
+
+    var body: some View {
+        let expanded = model.isExpanded
+
+        ZStack(alignment: .top) {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDismiss)
+
+            content
+                // Keep the content below the notch, which hides whatever is under it
+                .padding(.top, model.notchSize.height)
+                // Leave room for the flares at the top corners
+                .padding(.horizontal, Constants.Island.flareRadius)
+                .fixedSize()
+                .opacity(expanded ? 1 : 0)
+                .blur(radius: expanded ? 0 : 12)
+                .scaleEffect(expanded ? 1 : 0.7, anchor: .top)
+                .mask(GeometryReader { proxy in
+                    islandShape(fitting: proxy.size)
+                })
+                .background(GeometryReader { proxy in
+                    islandShape(fitting: proxy.size)
+                        .shadow(color: .black.opacity(expanded ? 0.45 : 0), radius: 18, y: 8)
+                })
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .environment(\.colorScheme, .dark)
+    }
+
+    /// The island in black, notch-sized while collapsed and filling `size`
+    /// when open, pinned to the top center either way.
+    private func islandShape(fitting size: CGSize) -> some View {
+        let expanded = model.isExpanded
+        let notch = model.notchSize
+        let flare = expanded ? Constants.Island.flareRadius : Constants.Island.collapsedFlareRadius
+        return IslandShape(
+            flareRadius: flare,
+            cornerRadius: expanded ? Constants.Island.cornerRadius : notch.height / 2
+        )
+        .fill(Color.black)
+        .frame(
+            width: expanded ? size.width : notch.width + 2 * flare,
+            height: expanded ? size.height : notch.height
+        )
+        .frame(width: size.width, height: size.height, alignment: .top)
+    }
+}
+
+private final class IslandPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+
+    // Sit over the menu bar, flush with the top of the screen, like the notch
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
+/// Shows Nook's controls in a Dynamic Island–style panel that drops out of
+/// the notch at the top center of the screen, and folds back into it on close.
+final class IslandController {
+    private let model = IslandModel()
+    private let panel: IslandPanel
+    private var pendingHide: DispatchWorkItem?
+
+    /// True from the moment the island starts opening until it starts closing
+    var isShown: Bool { model.isExpanded }
+
+    /// Called when the user clicks the empty space around the open island
+    var onDismiss: (() -> Void)?
+
+    init<Content: View>(content: Content) {
+        panel = IslandPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.level = .statusBar
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        // The island draws its own shadow so it follows the shape
+        panel.hasShadow = false
+        panel.isMovable = false
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+
+        let hostingView = NSHostingView(rootView: IslandView(
+            model: model,
+            onDismiss: { [weak self] in self?.onDismiss?() },
+            content: content
+        ))
+        // The panel is sized by hand. As the window's own content view, the
+        // hosting view would also resize the window, and the two fight until
+        // AppKit throws, so wrap it in a plain view instead.
+        hostingView.sizingOptions = []
+        hostingView.autoresizingMask = [.width, .height]
+        let container = NSView()
+        container.addSubview(hostingView)
+        panel.contentView = container
+        hostingView.frame = container.bounds
+    }
+
+    func show(on screen: NSScreen) {
+        pendingHide?.cancel()
+        pendingHide = nil
+        model.notchSize = Self.notchSize(of: screen)
+        layoutPanel(on: screen)
+        panel.orderFrontRegardless()
+        panel.makeKey()
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) {
+            model.isExpanded = true
+        }
+    }
+
+    func hide() {
+        guard model.isExpanded else { return }
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.92)) {
+            model.isExpanded = false
+        }
+        // Take the panel off screen once it has folded back into the notch
+        let work = DispatchWorkItem { [weak self] in
+            self?.panel.orderOut(nil)
+        }
+        pendingHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.Island.closeDuration, execute: work)
+    }
+
+    /// Spans a fixed column at the top center of the screen, wide enough for
+    /// the open island and its shadow. The empty part is transparent, so the
+    /// island can change height without the panel resizing mid-animation.
+    private func layoutPanel(on screen: NSScreen) {
+        let margin = Constants.Island.shadowMargin
+        let width = Constants.UI.panelWidth + 2 * (Constants.Island.flareRadius + margin)
+        let height = screen.frame.height - screen.visibleFrame.minY
+        let frame = NSRect(x: screen.frame.midX - width / 2, y: screen.frame.maxY - height, width: width, height: height)
+        if panel.frame != frame {
+            panel.setFrame(frame, display: true)
+        }
+    }
+
+    /// The notch's size on screens that have one; otherwise a notch-sized
+    /// slot as tall as the menu bar.
+    private static func notchSize(of screen: NSScreen) -> CGSize {
+        if #available(macOS 12.0, *),
+           screen.safeAreaInsets.top > 0,
+           let left = screen.auxiliaryTopLeftArea,
+           let right = screen.auxiliaryTopRightArea {
+            return CGSize(width: screen.frame.width - left.width - right.width, height: screen.safeAreaInsets.top)
+        }
+        return CGSize(width: Constants.Island.fallbackNotchWidth, height: NSStatusBar.system.thickness)
+    }
+}
+
