@@ -107,10 +107,12 @@ On first use, macOS asks for these permissions:
 go run ./clean-zsh [path/to/history]
 
 # Preview which Edge bookmark URLs have moved, then save them with -apply
-go run . [-apply] [-wait 3] [-bookmarks path] [-edge path]
+go run . [-apply] [-wait 3] [-bookmarks path] [-edge path] [-proxy url]
 ```
 
 Close Edge completely before running the bookmark updater with `-apply`, because Edge can overwrite its bookmarks file when it quits.
+
+The updater checks links in a fresh, signed-out Edge profile, so it doesn't use Edge's built-in VPN (Secure Network). If your network blocks a site, the check fails with `SKIP: page failed to load: ERR_CONNECTION_REFUSED`, even though the site opens in your normal Edge. Pass `-proxy` to send the check through a proxy or VPN, for example `-proxy socks5://127.0.0.1:1080`. Supported schemes are `http`, `https`, `socks4` and `socks5`, without a username or password.
 
 ### Project layout
 

@@ -80,6 +80,10 @@ func run() error {
 		"workers", 20,
 		"Number of bookmarks to check at the same time (1-32)",
 	)
+	proxy := flag.String(
+		"proxy", "",
+		"Send the check browser's traffic through this proxy, e.g. socks5://127.0.0.1:1080",
+	)
 	flag.Parse()
 
 	if *workers < 1 || *workers > 32 {
@@ -92,6 +96,12 @@ func run() error {
 
 	if *timeoutSeconds <= *waitSeconds {
 		return errors.New("-timeout must be greater than -wait")
+	}
+
+	if *proxy != "" {
+		if err := validateProxy(*proxy); err != nil {
+			return err
+		}
 	}
 
 	if _, err := os.Stat(*bookmarksPath); err != nil {
@@ -174,6 +184,14 @@ func run() error {
 		chromedp.Flag("no-first-run", true),
 		chromedp.Flag("no-default-browser-check", true),
 	)
+
+	// A proxy lets the check reach sites the local network blocks, the way
+	// a VPN does for the normal browser. Edge also resolves names through
+	// the proxy, so DNS blocks on the local network do not apply.
+	if *proxy != "" {
+		opts = append(opts, chromedp.ProxyServer(*proxy))
+		fmt.Printf("Using proxy %s\n", *proxy)
+	}
 
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(
 		context.Background(), opts...,
@@ -385,6 +403,20 @@ func checkBookmark(browserCtx context.Context, oldURL string, waitSeconds, timeo
 		}
 	}
 
+	if strings.HasPrefix(currentURL, "chrome-error:") {
+		// Edge shows its own error page; its code says why the load failed.
+		code, _ := chromedp.Run(ctx, chromedp.Evaluate[string](
+			`(document.querySelector('.error-code') || {}).textContent || ''`,
+		))
+		if code == "" {
+			code = "unknown error"
+		}
+		return bookmarkResult{
+			report: fmt.Sprintf("  SKIP: page failed to load: %s\n", strings.TrimSpace(code)),
+			skip:   true,
+		}
+	}
+
 	if !isHTTPURL(currentURL) {
 		return bookmarkResult{
 			report: fmt.Sprintf("  SKIP: final URL is not HTTP(S): %s\n", currentURL),
@@ -403,6 +435,31 @@ func checkBookmark(browserCtx context.Context, oldURL string, waitSeconds, timeo
 		newURL: currentURL,
 		report: fmt.Sprintf("  OLD: %s\n  NEW: %s\n", oldURL, currentURL),
 	}
+}
+
+// validateProxy rejects proxy URLs that Edge's --proxy-server cannot use.
+func validateProxy(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("-proxy: %w", err)
+	}
+
+	switch u.Scheme {
+	case "http", "https", "socks4", "socks5":
+	default:
+		return fmt.Errorf("-proxy must start with http://, https://, socks4:// or socks5://, got %q", rawURL)
+	}
+
+	if u.Hostname() == "" || u.Port() == "" {
+		return fmt.Errorf("-proxy needs a host and port, e.g. socks5://127.0.0.1:1080")
+	}
+
+	// Edge ignores credentials in --proxy-server and would fail every page.
+	if u.User != nil {
+		return errors.New("-proxy cannot contain a username or password; Edge does not support them on the command line")
+	}
+
+	return nil
 }
 
 // isLoginRedirect prevents login pages from being saved as destination URLs.
