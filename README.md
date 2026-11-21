@@ -10,7 +10,7 @@ Nook is a lightweight macOS app that brings everyday utilities together in one c
 
 Nook lives in your menu bar. Click its icon and Nook drops down from the notch at the top center of the screen, like the Dynamic Island. Click the icon again, click anywhere else or press Esc to fold it back up.
 
-The island has two pages. **Utilities** shows four tiles side by side: Pomodoro and Power Off on the left, Screen Recording and Bluetooth on the right. **System** shows your Mac's vitals. Switch between them with the button in the island's header, next to **Quit**.
+The island has two pages. **Utilities** shows five tiles in two columns: Pomodoro and Power Off on the left, Music, Screen Recording and Bluetooth on the right. **System** shows your Mac's vitals. Switch between them with the button in the island's header, next to **Quit**.
 
 <p align="center">
   <img src="screenshots/utilities.png" width="700" alt="The Utilities page: Pomodoro, Power Off, Screen Recording and Bluetooth tiles">
@@ -44,6 +44,17 @@ The island has two pages. **Utilities** shows four tiles side by side: Pomodoro 
   - **Connect** or **Disconnect** with one click. The first four devices are shown; **Show all** lists the rest.
   - To forget a device, use **System Settings › Bluetooth**. macOS doesn't let other apps unpair devices.
   - The first time, macOS asks you to allow Nook under **Bluetooth**.
+- **Music** — Study, sleep and focus music from YouTube, playing in the background.
+  - Pick a station from the menu in the Music tile: **Study**, **Sleep**, **Focus** or **Jazz**. Each plays a current live stream, so it never goes stale.
+  - Press 🔍 to search YouTube without leaving Nook. Filter by **Live**, **Playlists** or **Long (1h+)**, use ↑↓ to choose and press Return to play it now, or ⌘Return to also save it as a station. Esc goes back to the tiles. Your last 10 searches are listed until you type; **Clear** removes them.
+  - A result you play from search isn't saved until you press **☆ Save**. You can also **Add from YouTube Link…** (a link on the clipboard is filled in), and remove saved stations from the same menu.
+  - Switching stations fades the old music out. If something can't be played outside YouTube, Nook says so and the previous station keeps playing.
+  - Music keeps playing while the island is closed, with a ♪ icon in the menu bar. Right-click the menu bar icon to play, pause or switch stations without opening the island.
+  - Nothing plays until you press play; your last station and volume are remembered. Videos play through YouTube's own player, so YouTube's ads may play too.
+  - Once a station like **Study** is playing, the tile shows the stream's own title, with the station and channel underneath (for example *Study · Lofi Girl*).
+  - Press ↗ (or **Open in YouTube** in the menu) to open what's playing on youtube.com in your browser, at the same moment. Nook pauses so the two don't play over each other.
+  - **Recently Played** in the station menu lists the last 15 stations that played, whether presets, search results or playlists. **Clear Recently Played** empties it.
+  - **Connect YouTube Account** adds **Your Playlists** to the menu: your Liked videos and your own playlists, private ones included. Sign-in happens in your browser, Nook only reads your account, and **Disconnect** signs it out again. It needs a Google client ID when building; see [Connect YouTube](#connect-youtube).
 - **System** — Press **System** in the island's header to see your Mac's vitals at a glance; press **Utilities** to go back.
   - **CPU**, **GPU** and **Memory** usage, each with a meter that turns orange above 85%.
   - **Battery** level and whether it's charging, and **Network** download and upload speed.
@@ -107,6 +118,21 @@ On first use, macOS asks for these permissions:
 - **Notifications** — for shutdown alerts and break reminders.
 - **Bluetooth** — to list, connect and disconnect your devices.
 - **Screen & System Audio Recording** and **Microphone** — only when you record your screen.
+
+### Connect YouTube
+
+Listing your own playlists needs a Google OAuth client ID built into Nook. Without one, Nook works as usual but doesn't offer **Connect YouTube Account**. To set it up once:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable **YouTube Data API v3**.
+2. Set up the OAuth consent screen (External, in testing) and add your Google account as a test user.
+3. Create an **OAuth client ID** of type **iOS** with bundle ID `com.nook.app`.
+4. Put it in a `.env` file next to `build.sh` (it's gitignored), then run `./install.sh`:
+
+   ```
+   NOOK_YOUTUBE_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
+   ```
+
+`build.sh` also reads `NOOK_YOUTUBE_CLIENT_ID` from the environment. While the Google project is in testing, Google signs you out after 7 days and Nook offers to connect again. YouTube no longer gives apps your watch history, so **Recently Played** only covers what played in Nook.
 
 ### Command-line tools
 

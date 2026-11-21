@@ -9,6 +9,9 @@ import IOBluetooth
 import CoreBluetooth
 import IOKit
 import IOKit.ps
+import WebKit
+import AuthenticationServices
+import CryptoKit
 
 // MARK: - Constants
 
@@ -89,10 +92,6 @@ private enum Constants {
         static let step = 5
     }
 
-    enum Tooltip {
-        static let delay: TimeInterval = 0.5
-    }
-
     enum Recording {
         static let framesPerSecond: Int32 = 60
         static let audioSampleRate = 48_000
@@ -130,6 +129,34 @@ private enum Constants {
         static let sampleInterval: TimeInterval = 1.5
         /// Usage above this turns a meter orange
         static let highUsage = 0.85
+    }
+
+    enum Music {
+        static let defaultVolume = 40.0
+        /// How long the old music fades out before a new station starts
+        static let fadeMilliseconds = 500
+        static let searchDebounce: TimeInterval = 0.3
+        static let searchResultLimit = 15
+        static let recentSearchLimit = 10
+        /// Stations kept in "Recently Played"
+        static let recentlyPlayedLimit = 15
+        /// "Long" results: YouTube's own filter means over 20 minutes
+        static let longMinimumSeconds = 3600
+        /// A player this small starts at YouTube's lowest video quality, so it
+        /// never pauses mid-song to step down. Nobody sees the video anyway.
+        static let playerSize = CGSize(width: 256, height: 144)
+        /// Embeds need a real https origin; a blank one is refused (errors 152/153)
+        static let origin = "https://nook.local"
+        /// The client version youtube.com sends to its own search API
+        static let clientVersion = "2.20251120.01.00"
+
+        enum Keys {
+            static let volume = "music.volume"
+            static let lastStation = "music.lastStation"
+            static let customStations = "music.customStations"
+            static let recentSearches = "music.recentSearches"
+            static let recentlyPlayed = "music.recentlyPlayed"
+        }
     }
 }
 
@@ -2027,6 +2054,7 @@ private enum StatusIcon {
     static let shutdown = symbol("power.circle.fill", description: "Shutdown Scheduled")
     static let recording = symbol("record.circle.fill", description: "Recording Screen")
     static let recordingPaused = symbol("pause.circle.fill", description: "Recording Stopped")
+    static let music = symbol("music.note", description: "Playing Music")
 
     private static func symbol(_ name: String, description: String) -> NSImage? {
         let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
@@ -2042,6 +2070,1132 @@ private enum StatusIcon {
         image.isTemplate = true
         image.accessibilityDescription = description
         return image
+    }
+}
+
+// MARK: - Music
+
+struct MusicStation: Codable, Identifiable, Equatable {
+    enum Source: Codable, Equatable {
+        case video(String)
+        case playlist(String)
+        /// Presets play the top live stream for a search, so they never go
+        /// stale when a channel restarts its stream under a new ID
+        case liveSearch(String)
+        /// One of your own playlists, read through your signed-in account so
+        /// private ones play too
+        case accountPlaylist(String)
+    }
+
+    var id: String
+    var name: String
+    var emoji: String
+    var source: Source
+
+    var isPlaylist: Bool {
+        switch source {
+        case .playlist, .accountPlaylist: return true
+        case .video, .liveSearch: return false
+        }
+    }
+
+    /// Shortened, since saved video titles can run to a hundred characters
+    var menuTitle: String {
+        let limit = 48
+        let shortName = name.count > limit ? name.prefix(limit - 1).trimmingCharacters(in: .whitespaces) + "…" : name
+        return "\(emoji)  \(shortName)"
+    }
+
+    static let presets = [
+        MusicStation(id: "preset.study", name: "Study", emoji: "📚", source: .liveSearch("lofi hip hop radio")),
+        MusicStation(id: "preset.sleep", name: "Sleep", emoji: "🌙", source: .liveSearch("sleep music")),
+        MusicStation(id: "preset.focus", name: "Focus", emoji: "🎯", source: .liveSearch("deep focus music")),
+        MusicStation(id: "preset.jazz", name: "Jazz", emoji: "☕", source: .liveSearch("jazz cafe music"))
+    ]
+
+    /// A station for a video or playlist. The ID comes from YouTube's, so the
+    /// same video found twice is the same station.
+    static func youTube(_ source: Source, name: String) -> MusicStation {
+        let id: String
+        switch source {
+        case .video(let videoID): id = "video.\(videoID)"
+        case .playlist(let listID): id = "playlist.\(listID)"
+        case .liveSearch(let query): id = "search.\(query)"
+        case .accountPlaylist(let listID): id = "account.\(listID)"
+        }
+        return MusicStation(id: id, name: name, emoji: "★", source: source)
+    }
+
+    /// Reads a YouTube link (watch, youtu.be, live, shorts, embed, playlist)
+    /// or a bare 11-character video ID.
+    static func source(fromLink text: String) -> Source? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isVideoID = { (id: String) in id.range(of: #"^[A-Za-z0-9_-]{11}$"#, options: .regularExpression) != nil }
+        if isVideoID(trimmed) { return .video(trimmed) }
+
+        guard let components = URLComponents(string: trimmed.contains("://") ? trimmed : "https://" + trimmed),
+              let host = components.host?.lowercased(),
+              host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com") else { return nil }
+
+        // Auto-generated mixes ("RD…") only play on YouTube itself
+        if let list = components.queryItems?.first(where: { $0.name == "list" })?.value, !list.hasPrefix("RD") {
+            return .playlist(list)
+        }
+        let path = components.path.split(separator: "/").map(String.init)
+        var videoID = components.queryItems?.first(where: { $0.name == "v" })?.value
+        if host == "youtu.be" {
+            videoID = path.first
+        } else if path.count >= 2, ["live", "shorts", "embed"].contains(path[0]) {
+            videoID = path[1]
+        }
+        if let videoID = videoID, isVideoID(videoID) { return .video(videoID) }
+        return nil
+    }
+}
+
+enum MusicError: LocalizedError {
+    case badLink
+    case notEmbeddable
+    case notFound
+    case noLiveStream
+    case player(Int)
+    case network
+    case signIn
+    case emptyPlaylist
+
+    var errorDescription: String? {
+        switch self {
+        case .badLink: return "That isn't a YouTube video or playlist link"
+        case .notEmbeddable: return "This can only be played on YouTube"
+        case .notFound: return "This video is private or was removed"
+        case .noLiveStream: return "No live stream found right now"
+        case .network: return "Can't reach YouTube"
+        case .signIn: return "Connect your YouTube account again"
+        case .emptyPlaylist: return "This playlist has no videos"
+        case .player(let code):
+            switch code {
+            case 100: return "This video is private or was removed"
+            case 101, 150: return "This can only be played on YouTube"
+            case 2: return "That isn't a valid YouTube video"
+            default: return "YouTube couldn't play this (error \(code))"
+            }
+        }
+    }
+}
+
+enum MusicSearchFilter: String, CaseIterable, Identifiable {
+    case all, live, playlists, long
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "All"
+        case .live: return "Live"
+        case .playlists: return "Playlists"
+        case .long: return "Long (1h+)"
+        }
+    }
+
+    /// The `params` youtube.com sends for its own search filters
+    fileprivate var params: String? {
+        switch self {
+        case .all: return nil
+        case .live: return "EgJAAQ=="
+        case .playlists: return "EgIQAw=="
+        case .long: return "EgIYAg=="
+        }
+    }
+}
+
+struct MusicSearchResult: Identifiable, Equatable {
+    enum Kind { case video, live, playlist }
+
+    let id: String
+    let kind: Kind
+    let title: String
+    let channel: String
+    /// Duration, "LIVE" or the number of videos
+    let detail: String
+    let thumbnail: URL?
+    let durationSeconds: Int?
+
+    var station: MusicStation {
+        MusicStation.youTube(kind == .playlist ? .playlist(id) : .video(id), name: title)
+    }
+}
+
+/// Talks to YouTube without an API key: search goes through the same API
+/// youtube.com uses, and oEmbed tells whether a video may be embedded.
+private enum YouTube {
+    static func search(_ query: String, filter: MusicSearchFilter) async throws -> [MusicSearchResult] {
+        var request = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/search?prettyPrint=false")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = [
+            "context": ["client": ["clientName": "WEB", "clientVersion": Constants.Music.clientVersion, "hl": "en"]],
+            "query": query
+        ]
+        if let params = filter.params { body["params"] = params }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw MusicError.network
+        }
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw MusicError.network }
+        let json = try JSONSerialization.jsonObject(with: data)
+
+        // Results come in sections; each item is a video or a playlist ("lockup")
+        let sections = dig(json, "contents", "twoColumnSearchResultsRenderer", "primaryContents",
+                           "sectionListRenderer", "contents") as? [Any] ?? []
+        var results: [MusicSearchResult] = []
+        var seen = Set<String>()
+        for section in sections {
+            for item in dig(section, "itemSectionRenderer", "contents") as? [Any] ?? [] {
+                let result = (dig(item, "videoRenderer") as? [String: Any]).flatMap(video)
+                    ?? (dig(item, "lockupViewModel") as? [String: Any]).flatMap(playlist)
+                if let result = result, seen.insert(result.id).inserted {
+                    results.append(result)
+                }
+            }
+        }
+        if filter == .long {
+            results = results.filter { ($0.durationSeconds ?? 0) >= Constants.Music.longMinimumSeconds }
+        }
+        return Array(results.prefix(Constants.Music.searchResultLimit))
+    }
+
+    /// The title of a video or playlist, after checking it can be played
+    /// outside YouTube. Throws `MusicError` when it can't.
+    static func playableTitle(of source: MusicStation.Source) async throws -> String {
+        let link: String
+        switch source {
+        case .video(let id): link = "https://www.youtube.com/watch?v=\(id)"
+        case .playlist(let id), .accountPlaylist(let id): link = "https://www.youtube.com/playlist?list=\(id)"
+        case .liveSearch(let query): return query
+        }
+        var components = URLComponents(string: "https://www.youtube.com/oembed")!
+        components.queryItems = [URLQueryItem(name: "format", value: "json"), URLQueryItem(name: "url", value: link)]
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(from: components.url!)
+        } catch {
+            throw MusicError.network
+        }
+        switch (response as? HTTPURLResponse)?.statusCode {
+        case 200:
+            let title = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["title"] as? String
+            return title ?? "YouTube"
+        case 401, 403: throw MusicError.notEmbeddable
+        case 400, 404: throw MusicError.notFound
+        default: throw MusicError.network
+        }
+    }
+
+    private static func video(_ renderer: [String: Any]) -> MusicSearchResult? {
+        guard let id = renderer["videoId"] as? String else { return nil }
+        let length = text(renderer["lengthText"])
+        let badges = (renderer["badges"] as? [Any] ?? []).compactMap { dig($0, "metadataBadgeRenderer", "label") as? String }
+        let isLive = badges.contains("LIVE") || length.isEmpty
+        let channel = text(renderer["ownerText"]).isEmpty ? text(renderer["longBylineText"]) : text(renderer["ownerText"])
+        return MusicSearchResult(
+            id: id,
+            kind: isLive ? .live : .video,
+            title: text(renderer["title"]),
+            channel: channel,
+            detail: isLive ? "LIVE" : length,
+            thumbnail: URL(string: "https://i.ytimg.com/vi/\(id)/mqdefault.jpg"),
+            durationSeconds: isLive ? nil : seconds(fromClock: length)
+        )
+    }
+
+    private static func playlist(_ lockup: [String: Any]) -> MusicSearchResult? {
+        guard lockup["contentType"] as? String == "LOCKUP_CONTENT_TYPE_PLAYLIST",
+              let id = lockup["contentId"] as? String,
+              !id.hasPrefix("RD") else { return nil }
+        let metadata = dig(lockup, "metadata", "lockupMetadataViewModel")
+        let thumbnail = dig(lockup, "contentImage", "collectionThumbnailViewModel", "primaryThumbnail", "thumbnailViewModel")
+        let overlays = dig(thumbnail, "overlays") as? [Any] ?? []
+        let count = overlays.lazy.compactMap {
+            dig($0, "thumbnailOverlayBadgeViewModel", "thumbnailBadges", 0, "thumbnailBadgeViewModel", "text") as? String
+        }.first
+        return MusicSearchResult(
+            id: id,
+            kind: .playlist,
+            title: dig(metadata, "title", "content") as? String ?? "Playlist",
+            channel: dig(metadata, "metadata", "contentMetadataViewModel", "metadataRows", 0,
+                         "metadataParts", 0, "text", "content") as? String ?? "",
+            detail: count ?? "Playlist",
+            thumbnail: (dig(thumbnail, "image", "sources", 0, "url") as? String).flatMap(URL.init(string:)),
+            durationSeconds: nil
+        )
+    }
+
+    /// Follows dictionary keys and array indexes through decoded JSON
+    static func dig(_ object: Any?, _ path: Any...) -> Any? {
+        path.reduce(object) { current, step in
+            if let key = step as? String { return (current as? [String: Any])?[key] }
+            if let index = step as? Int, let array = current as? [Any], array.indices.contains(index) { return array[index] }
+            return nil
+        }
+    }
+
+    /// YouTube text is either `simpleText` or a list of styled `runs`
+    private static func text(_ object: Any?) -> String {
+        if let simple = dig(object, "simpleText") as? String { return simple }
+        let runs = dig(object, "runs") as? [Any] ?? []
+        return runs.compactMap { dig($0, "text") as? String }.joined()
+    }
+
+    private static func seconds(fromClock clock: String) -> Int? {
+        let parts = clock.split(separator: ":").compactMap { Int($0) }
+        guard !parts.isEmpty else { return nil }
+        return parts.reduce(0) { $0 * 60 + $1 }
+    }
+}
+
+/// Plays YouTube in a WKWebView whose window is never shown, so the music
+/// keeps going while the island is folded away.
+// MARK: - YouTube Account
+
+/// Signs in to Google so the station menu can list your own YouTube
+/// playlists. Sign-in runs in the system browser sheet with PKCE (no client
+/// secret); only the refresh token is kept, in the Keychain. Read-only: Nook
+/// never changes anything in the account.
+///
+/// Needs Nook's Google OAuth client ID ("iOS" type, bundle ID com.nook.app),
+/// which build.sh stamps into Info.plist from `NOOK_YOUTUBE_CLIENT_ID`.
+final class YouTubeAccount: NSObject, ObservableObject {
+    @Published private(set) var isSignedIn: Bool
+    /// Liked videos first, then your playlists as YouTube orders them
+    @Published private(set) var playlists: [MusicStation] = []
+
+    /// Nook's OAuth client ID, built into the app
+    private let clientID: String? = {
+        let value = Bundle.main.object(forInfoDictionaryKey: "NookYouTubeClientID") as? String
+        return value?.isEmpty == false ? value : nil
+    }()
+
+    /// False in builds made without a client ID, which can't sign in
+    var canSignIn: Bool { clientID != nil }
+
+    private var accessToken: String?
+    private var accessTokenExpiry = Date.distantPast
+    private var authSession: ASWebAuthenticationSession?
+    private var lastRefresh = Date.distantPast
+
+    private enum Keys {
+        static let refreshToken = "youtube.refreshToken"
+    }
+    private static let scope = "https://www.googleapis.com/auth/youtube.readonly"
+    private static let api = "https://www.googleapis.com/youtube/v3/"
+    /// The player takes at most this many videos in one playlist
+    private static let maxVideos = 200
+
+    override init() {
+        isSignedIn = Keychain.read(Keys.refreshToken) != nil
+        super.init()
+    }
+
+    // MARK: Signing in
+
+    /// Opens Google's sign-in in the browser sheet
+    func signIn() {
+        guard let clientID = clientID else { return }
+        let verifier = Self.randomURLSafeString()
+        let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncoded
+        let scheme = Self.redirectScheme(for: clientID)
+        let redirect = scheme + ":/oauth2redirect"
+
+        var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "redirect_uri", value: redirect),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "scope", value: Self.scope),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256")
+        ]
+
+        let session = ASWebAuthenticationSession(url: components.url!, callbackURLScheme: scheme) { [weak self] url, error in
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.authSession = nil
+                if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin { return }
+                guard let url = url,
+                      let code = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                        .queryItems?.first(where: { $0.name == "code" })?.value else {
+                    self.showError("Google didn't sign you in. \(error?.localizedDescription ?? "")")
+                    return
+                }
+                do {
+                    try await self.exchange(code: code, verifier: verifier, redirect: redirect, clientID: clientID)
+                    await self.refreshPlaylists(force: true)
+                } catch {
+                    self.showError((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                }
+            }
+        }
+        session.presentationContextProvider = self
+        authSession = session
+        NSApp.activate(ignoringOtherApps: true)
+        session.start()
+    }
+
+    func signOut() {
+        if let token = Keychain.read(Keys.refreshToken) {
+            // Best effort: revoke so the grant disappears from the Google account too
+            var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/revoke")!)
+            request.httpMethod = "POST"
+            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Self.formBody(["token": token])
+            URLSession.shared.dataTask(with: request).resume()
+        }
+        Keychain.delete(Keys.refreshToken)
+        accessToken = nil
+        accessTokenExpiry = .distantPast
+        playlists = []
+        isSignedIn = false
+    }
+
+    private func showError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't connect YouTube"
+        alert.informativeText = message
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    // MARK: Tokens
+
+    @MainActor
+    private func exchange(code: String, verifier: String, redirect: String, clientID: String) async throws {
+        let json = try await Self.postToken([
+            "client_id": clientID,
+            "code": code,
+            "code_verifier": verifier,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect
+        ])
+        guard let refreshToken = json["refresh_token"] as? String else { throw MusicError.signIn }
+        Keychain.write(refreshToken, for: Keys.refreshToken)
+        store(json)
+        isSignedIn = true
+    }
+
+    /// A valid access token, refreshed when the old one is about to expire
+    @MainActor
+    private func validAccessToken() async throws -> String {
+        if let token = accessToken, accessTokenExpiry.timeIntervalSinceNow > 60 { return token }
+        guard let clientID = clientID, let refreshToken = Keychain.read(Keys.refreshToken) else {
+            throw MusicError.signIn
+        }
+        do {
+            let json = try await Self.postToken([
+                "client_id": clientID,
+                "refresh_token": refreshToken,
+                "grant_type": "refresh_token"
+            ])
+            store(json)
+        } catch MusicError.signIn {
+            // The grant was revoked or expired: sign out so the menu offers to connect again
+            signOut()
+            throw MusicError.signIn
+        }
+        guard let token = accessToken else { throw MusicError.signIn }
+        return token
+    }
+
+    private func store(_ json: [String: Any]) {
+        accessToken = json["access_token"] as? String
+        accessTokenExpiry = Date().addingTimeInterval(json["expires_in"] as? Double ?? 3600)
+    }
+
+    private static func postToken(_ fields: [String: String]) async throws -> [String: Any] {
+        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = formBody(fields)
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw MusicError.network
+        }
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        switch (response as? HTTPURLResponse)?.statusCode {
+        case 200: return json
+        case 400, 401: throw MusicError.signIn
+        default: throw MusicError.network
+        }
+    }
+
+    // MARK: Playlists
+
+    /// Reloads the playlist list, at most once a minute unless `force`d
+    @MainActor
+    func refreshPlaylists(force: Bool = false) async {
+        guard isSignedIn, force || Date().timeIntervalSince(lastRefresh) > 60 else { return }
+        lastRefresh = Date()
+        do {
+            var stations: [MusicStation] = []
+            let channels = try await get("channels", ["part": "contentDetails", "mine": "true"])
+            if let likes = YouTube.dig(channels, "items", 0, "contentDetails", "relatedPlaylists", "likes") as? String {
+                stations.append(MusicStation(id: "account.\(likes)", name: "Liked videos", emoji: "♥", source: .accountPlaylist(likes)))
+            }
+            var pageToken: String?
+            repeat {
+                var query = ["part": "snippet", "mine": "true", "maxResults": "50"]
+                query["pageToken"] = pageToken
+                let page = try await get("playlists", query)
+                for item in page["items"] as? [[String: Any]] ?? [] {
+                    guard let id = item["id"] as? String else { continue }
+                    let name = YouTube.dig(item, "snippet", "title") as? String ?? "Playlist"
+                    stations.append(MusicStation(id: "account.\(id)", name: name, emoji: "▶", source: .accountPlaylist(id)))
+                }
+                pageToken = page["nextPageToken"] as? String
+            } while pageToken != nil
+            playlists = stations
+        } catch {
+            // Keep the last list; the menu still works with it
+            NSLog("Nook: couldn't load YouTube playlists: \(error.localizedDescription)")
+        }
+    }
+
+    /// The video IDs in one of your playlists, private ones included, in order
+    @MainActor
+    func videoIDs(in playlistID: String) async throws -> [String] {
+        var ids: [String] = []
+        var pageToken: String?
+        repeat {
+            var query = ["part": "contentDetails", "playlistId": playlistID, "maxResults": "50"]
+            query["pageToken"] = pageToken
+            let page = try await get("playlistItems", query)
+            for item in page["items"] as? [[String: Any]] ?? [] {
+                if let id = YouTube.dig(item, "contentDetails", "videoId") as? String { ids.append(id) }
+            }
+            pageToken = page["nextPageToken"] as? String
+        } while pageToken != nil && ids.count < Self.maxVideos
+        return Array(ids.prefix(Self.maxVideos))
+    }
+
+    @MainActor
+    private func get(_ path: String, _ query: [String: String]) async throws -> [String: Any] {
+        let token = try await validAccessToken()
+        var components = URLComponents(string: Self.api + path)!
+        components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw MusicError.network
+        }
+        switch (response as? HTTPURLResponse)?.statusCode {
+        case 200: return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        case 401: accessToken = nil; throw MusicError.signIn
+        case 404: throw MusicError.notFound
+        default: throw MusicError.network
+        }
+    }
+
+    // MARK: Helpers
+
+    /// Google's redirect scheme for an iOS client: the client ID reversed
+    private static func redirectScheme(for clientID: String) -> String {
+        clientID.split(separator: ".").reversed().joined(separator: ".")
+    }
+
+    private static func randomURLSafeString() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return Data(bytes).base64URLEncoded
+    }
+
+    private static func formBody(_ fields: [String: String]) -> Data {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return fields
+            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
+            .joined(separator: "&")
+            .data(using: .utf8)!
+    }
+}
+
+extension YouTubeAccount: ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        NSApp.keyWindow ?? NSApp.windows.first { $0.isVisible } ?? NSWindow()
+    }
+}
+
+private extension Data {
+    var base64URLEncoded: String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// Generic passwords in the login keychain, under Nook's own service name
+private enum Keychain {
+    private static let service = "com.nook.app"
+
+    static func read(_ account: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func write(_ value: String, for account: String) {
+        delete(account)
+        let item: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: Data(value.utf8)
+        ]
+        SecItemAdd(item as CFDictionary, nil)
+    }
+
+    static func delete(_ account: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+final class MusicPlayer: NSObject, ObservableObject {
+    enum Status: Equatable {
+        case idle
+        case loading
+        case playing
+        case paused
+        case failed(String)
+    }
+
+    @Published private(set) var station: MusicStation?
+    @Published private(set) var status: Status = .idle {
+        didSet { if status != oldValue { onChange?() } }
+    }
+    /// The title of the video playing now, which changes through a playlist
+    @Published private(set) var title: String?
+    /// The channel of the video playing now
+    @Published private(set) var channel: String?
+    /// The YouTube ID of the video playing now, for opening it in the browser
+    @Published private(set) var videoID: String?
+    /// Shown briefly when a station couldn't play and the previous one came back
+    @Published private(set) var notice: String?
+    @Published private(set) var customStations: [MusicStation] {
+        didSet { save(customStations, forKey: Constants.Music.Keys.customStations) }
+    }
+    /// What played in Nook, newest first: presets, saved stations, search
+    /// results and your playlists alike
+    @Published private(set) var recentlyPlayed: [MusicStation] {
+        didSet { save(recentlyPlayed, forKey: Constants.Music.Keys.recentlyPlayed) }
+    }
+    @Published var volume: Double {
+        didSet {
+            defaults.set(volume, forKey: Constants.Music.Keys.volume)
+            run("nook.setVolume(\(Int(volume)))", onlyIfReady: true)
+        }
+    }
+
+    /// Called whenever playback starts or stops, so the menu bar can refresh
+    var onChange: (() -> Void)?
+    /// Plays your own playlists, when you've connected YouTube
+    weak var account: YouTubeAccount?
+
+    var stations: [MusicStation] { MusicStation.presets + customStations }
+
+    /// Playing, or on its way to playing
+    var isActive: Bool { status == .playing || status == .loading }
+
+    /// Types like Study play whichever stream tops a search, so once it's
+    /// known they're labelled with that video's own title
+    var stationTitle: String? {
+        guard let station = station else { return nil }
+        if case .liveSearch = station.source, let title = title {
+            return MusicStation(id: station.id, name: title, emoji: station.emoji, source: station.source).menuTitle
+        }
+        return station.menuTitle
+    }
+
+    /// For a type like Study: the type and the channel, e.g. "Study · Lofi Girl"
+    var stationDetail: String? {
+        guard let station = station, case .liveSearch = station.source else { return nil }
+        return [station.name, channel].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// A station from search that isn't saved
+    var isUnsaved: Bool {
+        guard let station = station else { return false }
+        return !stations.contains { $0.id == station.id }
+    }
+
+    private let defaults = UserDefaults.standard
+    private var window: NSWindow?
+    private var webView: WKWebView?
+    private var isPlayerReady = false
+    /// A command sent before the player finished loading
+    private var pendingCommand: String?
+    private var loadTask: Task<Void, Never>?
+    /// What played before the current station; it comes back if the new one can't play
+    private var fallback: MusicStation?
+    /// Live stream IDs found for presets this session
+    private var liveStreams: [String: String] = [:]
+    private var noticeWork: DispatchWorkItem?
+
+    override init() {
+        defaults.register(defaults: [Constants.Music.Keys.volume: Constants.Music.defaultVolume])
+        volume = defaults.double(forKey: Constants.Music.Keys.volume)
+        customStations = Self.load([MusicStation].self, forKey: Constants.Music.Keys.customStations) ?? []
+        recentlyPlayed = Self.load([MusicStation].self, forKey: Constants.Music.Keys.recentlyPlayed) ?? []
+        station = Self.load(MusicStation.self, forKey: Constants.Music.Keys.lastStation) ?? MusicStation.presets[0]
+        super.init()
+    }
+
+    // MARK: Actions
+
+    func play(_ newStation: MusicStation) {
+        if station != newStation, status == .playing || status == .paused {
+            fallback = station
+        }
+        station = newStation
+        title = nil
+        channel = nil
+        videoID = nil
+        status = .loading
+        save(newStation, forKey: Constants.Music.Keys.lastStation)
+
+        loadTask?.cancel()
+        loadTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            do {
+                let item = try await self.playerItem(for: newStation)
+                guard !Task.isCancelled, self.station == newStation else { return }
+                self.run("nook.load(\(item))")
+            } catch {
+                guard !Task.isCancelled, self.station == newStation else { return }
+                self.couldNotPlay(error)
+            }
+        }
+    }
+
+    func togglePlayPause() {
+        switch status {
+        case .playing, .loading:
+            loadTask?.cancel()
+            run("nook.pause()", onlyIfReady: true)
+            status = .paused
+        case .paused:
+            run("nook.play()", onlyIfReady: true)
+        case .idle, .failed:
+            if let station = station { play(station) }
+        }
+    }
+
+    func next() { run("nook.next()", onlyIfReady: true) }
+
+    /// Opens the video playing now on youtube.com in the default browser, at
+    /// the same moment, and pauses Nook so the two don't play over each other
+    func openInBrowser() {
+        guard let videoID = videoID else { return }
+        let isLive: Bool = {
+            if case .liveSearch = station?.source { return true }
+            return false
+        }()
+        let open = { (seconds: Int) in
+            var link = "https://www.youtube.com/watch?v=\(videoID)"
+            if !isLive, seconds > 0 { link += "&t=\(seconds)s" }
+            if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+        }
+        if isActive { togglePlayPause() }
+        guard isPlayerReady, let webView = webView, !isLive else {
+            open(0)
+            return
+        }
+        webView.evaluateJavaScript("player.getCurrentTime()") { result, _ in
+            open(Int((result as? Double) ?? 0))
+        }
+    }
+    func previous() { run("nook.previous()", onlyIfReady: true) }
+
+    /// Saves the station playing from search, so it stays in the station list
+    func saveCurrentStation() {
+        guard let station = station, isUnsaved else { return }
+        customStations.append(station)
+    }
+
+    func add(_ station: MusicStation) {
+        guard !stations.contains(where: { $0.id == station.id }) else { return }
+        customStations.append(station)
+    }
+
+    func removeCustomStation(_ station: MusicStation) {
+        customStations.removeAll { $0.id == station.id }
+    }
+
+    func clearRecentlyPlayed() {
+        recentlyPlayed = []
+    }
+
+    /// Moves `station` to the top of Recently Played once it actually plays
+    private func remember(_ station: MusicStation) {
+        guard recentlyPlayed.first?.id != station.id else { return }
+        var list = recentlyPlayed.filter { $0.id != station.id }
+        list.insert(station, at: 0)
+        recentlyPlayed = Array(list.prefix(Constants.Music.recentlyPlayedLimit))
+    }
+
+    /// Checks a pasted link, saves it as a station and plays it
+    func addStation(fromLink link: String) async throws {
+        guard let source = MusicStation.source(fromLink: link) else { throw MusicError.badLink }
+        let title = try await YouTube.playableTitle(of: source)
+        let station = MusicStation.youTube(source, name: title)
+        await MainActor.run {
+            add(station)
+            play(station)
+        }
+    }
+
+    // MARK: Player
+
+    /// The JS object `nook.load` takes: a video or a playlist to start
+    private func playerItem(for station: MusicStation) async throws -> String {
+        switch station.source {
+        case .video(let id):
+            return "{videoId: '\(id)'}"
+        case .playlist(let id):
+            return "{list: '\(id)'}"
+        case .accountPlaylist(let id):
+            guard let account = account else { throw MusicError.signIn }
+            let ids = try await account.videoIDs(in: id)
+            guard !ids.isEmpty else { throw MusicError.emptyPlaylist }
+            let list = String(data: try JSONSerialization.data(withJSONObject: ids), encoding: .utf8) ?? "[]"
+            return "{videos: \(list)}"
+        case .liveSearch(let query):
+            if let id = liveStreams[query] { return "{videoId: '\(id)'}" }
+            guard let stream = try await YouTube.search(query, filter: .live).first(where: { $0.kind == .live }) else {
+                throw MusicError.noLiveStream
+            }
+            await MainActor.run { liveStreams[query] = stream.id }
+            return "{videoId: '\(stream.id)'}"
+        }
+    }
+
+    private func couldNotPlay(_ error: Error) {
+        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        if let fallback = fallback, fallback != station {
+            let failedName = station?.name ?? "This station"
+            self.fallback = nil
+            play(fallback)
+            show(notice: "Couldn't play “\(failedName)”: \(message)")
+        } else {
+            status = .failed(message)
+        }
+    }
+
+    private func show(notice text: String) {
+        notice = text
+        noticeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.notice = nil }
+        noticeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+    }
+
+    /// Runs JS in the player, loading the player first if needed. With
+    /// `onlyIfReady`, commands are dropped while there's no player to obey them.
+    private func run(_ command: String, onlyIfReady: Bool = false) {
+        guard isPlayerReady, let webView = webView else {
+            guard !onlyIfReady else { return }
+            pendingCommand = command
+            loadPlayer()
+            return
+        }
+        webView.evaluateJavaScript(command) { _, error in
+            if let error = error {
+                NSLog("Nook: music command failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func loadPlayer() {
+        guard webView == nil else { return }
+        let config = WKWebViewConfiguration()
+        config.mediaTypesRequiringUserActionForPlayback = []
+        config.userContentController.add(self, name: "nook")
+
+        let size = Constants.Music.playerSize
+        let webView = WKWebView(frame: NSRect(origin: .zero, size: size), configuration: config)
+        // Never ordered on screen: playback keeps going while it's hidden
+        let window = NSWindow(contentRect: webView.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = webView
+        self.window = window
+        self.webView = webView
+        webView.loadHTMLString(playerHTML, baseURL: URL(string: Constants.Music.origin + "/"))
+    }
+
+    private var playerHTML: String {
+        let size = Constants.Music.playerSize
+        return """
+        <!doctype html><html><body style="margin:0;background:#000">
+        <div id="player"></div>
+        <script src="https://www.youtube.com/iframe_api"></script>
+        <script>
+        const post = message => window.webkit.messageHandlers.nook.postMessage(message);
+        let player, fadeTimer, volume = \(Int(volume));
+
+        function onYouTubeIframeAPIReady() {
+          player = new YT.Player('player', {
+            width: \(Int(size.width)), height: \(Int(size.height)),
+            playerVars: { autoplay: 1, controls: 0, disablekb: 1, origin: '\(Constants.Music.origin)' },
+            events: {
+              onReady: () => { player.setVolume(volume); post({ event: 'ready' }); },
+              onStateChange: e => post({ event: 'state', state: e.data, title: (player.getVideoData() || {}).title || '', channel: (player.getVideoData() || {}).author || '', videoId: (player.getVideoData() || {}).video_id || '' }),
+              onError: e => post({ event: 'error', code: e.data })
+            }
+          });
+        }
+
+        function fade(to, ms, done) {
+          clearInterval(fadeTimer);
+          const from = player.getVolume(), steps = 10;
+          let step = 0;
+          fadeTimer = setInterval(() => {
+            step++;
+            player.setVolume(Math.round(from + (to - from) * step / steps));
+            if (step >= steps) { clearInterval(fadeTimer); done(); }
+          }, ms / steps);
+        }
+
+        window.nook = {
+          load(item) {
+            const start = () => {
+              if (item.videos) { player.loadPlaylist(item.videos); }
+              else if (item.list) { player.loadPlaylist({ list: item.list, listType: 'playlist' }); }
+              else { player.loadVideoById(item.videoId); }
+              player.setVolume(volume);
+            };
+            if (player.getPlayerState() === YT.PlayerState.PLAYING) { fade(0, \(Constants.Music.fadeMilliseconds), start); }
+            else { start(); }
+          },
+          play() { player.playVideo(); },
+          pause() { clearInterval(fadeTimer); player.pauseVideo(); },
+          next() { player.nextVideo(); },
+          previous() { player.previousVideo(); },
+          setVolume(value) { volume = value; clearInterval(fadeTimer); player.setVolume(value); }
+        };
+        </script></body></html>
+        """
+    }
+
+    private func handle(event: [String: Any]) {
+        switch event["event"] as? String {
+        case "ready":
+            isPlayerReady = true
+            if let command = pendingCommand {
+                pendingCommand = nil
+                run(command)
+            }
+        case "state":
+            if let newTitle = event["title"] as? String, !newTitle.isEmpty {
+                title = newTitle
+            }
+            if let newChannel = event["channel"] as? String, !newChannel.isEmpty {
+                channel = newChannel
+            }
+            if let newVideoID = event["videoId"] as? String, !newVideoID.isEmpty {
+                videoID = newVideoID
+            }
+            // YT.PlayerState: -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued
+            switch event["state"] as? Int {
+            case 1:
+                status = .playing
+                fallback = nil
+                if let station = station { remember(station) }
+            case 0, 2, 5:
+                if status != .loading || event["state"] as? Int == 0 { status = .paused }
+            case 3, -1:
+                if status != .paused { status = .loading }
+            default:
+                break
+            }
+        case "error":
+            couldNotPlay(MusicError.player(event["code"] as? Int ?? 0))
+        default:
+            break
+        }
+    }
+
+    // MARK: Saving
+
+    private func save<Value: Encodable>(_ value: Value, forKey key: String) {
+        if let data = try? JSONEncoder().encode(value) {
+            defaults.set(data, forKey: key)
+        }
+    }
+
+    private static func load<Value: Decodable>(_ type: Value.Type, forKey key: String) -> Value? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+}
+
+extension MusicPlayer: WKScriptMessageHandler {
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let event = message.body as? [String: Any] else { return }
+        handle(event: event)
+    }
+}
+
+/// The YouTube search shown in the island: results as you type, picked with
+/// the arrow keys and played with Return.
+final class MusicSearch: ObservableObject {
+    @Published private(set) var isPresented = false
+    @Published var query = "" {
+        didSet { if query != oldValue { scheduleSearch() } }
+    }
+    @Published var filter: MusicSearchFilter = .all {
+        didSet { if filter != oldValue { scheduleSearch(after: 0) } }
+    }
+    @Published private(set) var results: [MusicSearchResult] = []
+    @Published var selection = 0
+    @Published private(set) var isSearching = false
+    @Published private(set) var errorMessage: String?
+    /// Results that turned out not to play outside YouTube
+    @Published private(set) var unplayable: [String: String] = [:]
+    /// The result being checked before it plays
+    @Published private(set) var checkingID: String?
+    @Published private(set) var recentSearches: [String]
+
+    private let player: MusicPlayer
+    private var searchTask: Task<Void, Never>?
+    private var playTask: Task<Void, Never>?
+
+    init(player: MusicPlayer) {
+        self.player = player
+        recentSearches = UserDefaults.standard.stringArray(forKey: Constants.Music.Keys.recentSearches) ?? []
+    }
+
+    func present() {
+        isPresented = true
+        selection = 0
+    }
+
+    func dismiss() {
+        isPresented = false
+        searchTask?.cancel()
+        playTask?.cancel()
+        isSearching = false
+        checkingID = nil
+    }
+
+    func playSelected(saving: Bool) {
+        guard results.indices.contains(selection) else { return }
+        play(results[selection], saving: saving)
+    }
+
+    /// Checks the result can play outside YouTube first, so a dud never
+    /// interrupts what's playing now
+    func play(_ result: MusicSearchResult, saving: Bool) {
+        guard unplayable[result.id] == nil else { return }
+        checkingID = result.id
+        playTask?.cancel()
+        playTask = Task { @MainActor [weak self] in
+            do {
+                _ = try await YouTube.playableTitle(of: result.station.source)
+                guard let self = self, !Task.isCancelled else { return }
+                self.checkingID = nil
+                if saving { self.player.add(result.station) }
+                self.player.play(result.station)
+                self.remember(self.query)
+                self.dismiss()
+            } catch {
+                guard let self = self, !Task.isCancelled else { return }
+                self.checkingID = nil
+                self.unplayable[result.id] = (error as? LocalizedError)?.errorDescription ?? "Can't play this"
+            }
+        }
+    }
+
+    /// Arrow keys, Return and Esc while the search is open. Returns false for
+    /// keys the text field should get.
+    func handle(_ event: NSEvent) -> Bool {
+        switch event.keyCode {
+        case Constants.Island.escapeKeyCode:
+            dismiss()
+        case 125: // down
+            if !results.isEmpty { selection = min(selection + 1, results.count - 1) }
+        case 126: // up
+            selection = max(selection - 1, 0)
+        case 36, 76: // return, keypad enter
+            playSelected(saving: event.modifierFlags.contains(.command))
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func scheduleSearch(after delay: TimeInterval = Constants.Music.searchDebounce) {
+        searchTask?.cancel()
+        let query = self.query.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else {
+            results = []
+            isSearching = false
+            errorMessage = nil
+            return
+        }
+        let filter = self.filter
+        isSearching = true
+        searchTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            do {
+                let results = try await YouTube.search(query, filter: filter)
+                guard let self = self, !Task.isCancelled else { return }
+                self.results = results
+                self.selection = 0
+                self.errorMessage = results.isEmpty ? "No results" : nil
+            } catch {
+                guard let self = self, !Task.isCancelled else { return }
+                self.results = []
+                self.errorMessage = (error as? LocalizedError)?.errorDescription ?? "Search failed"
+            }
+            self?.isSearching = false
+        }
+    }
+
+    func clearRecentSearches() {
+        recentSearches = []
+        UserDefaults.standard.removeObject(forKey: Constants.Music.Keys.recentSearches)
+    }
+
+    private func remember(_ query: String) {
+        let query = query.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return }
+        recentSearches.removeAll { $0.caseInsensitiveCompare(query) == .orderedSame }
+        recentSearches.insert(query, at: 0)
+        recentSearches = Array(recentSearches.prefix(Constants.Music.recentSearchLimit))
+        UserDefaults.standard.set(recentSearches, forKey: Constants.Music.Keys.recentSearches)
     }
 }
 
@@ -2075,6 +3229,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let screenRecorder = ScreenRecorder()
     let bluetooth = BluetoothManager()
     let systemMonitor = SystemMonitor()
+    let music = MusicPlayer()
+    let youTubeAccount = YouTubeAccount()
+    lazy var musicSearch = MusicSearch(player: music)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestNotificationPermissions()
@@ -2087,6 +3244,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             self?.updateStatusItem()
             self?.updateStopRecordingItem()
         }
+        music.onChange = { [weak self] in
+            self?.updateStatusItem()
+        }
+        music.account = youTubeAccount
+        Task { await youTubeAccount.refreshPlaylists() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -2192,12 +3354,139 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         guard let button = statusItem.button else { return }
         button.image = NookGlyph.image
-        button.action = #selector(toggleIsland)
+        button.action = #selector(statusItemClicked)
         button.target = self
+        // Right-click opens the music menu; left-click toggles the island
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    @objc private func statusItemClicked() {
+        // An accessibility press has no event of its own, so a right-click
+        // from earlier would still be current: only trust a fresh one
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp,
+           ProcessInfo.processInfo.systemUptime - event.timestamp < 1 {
+            showMusicMenu()
+        } else {
+            toggleIsland()
+        }
+    }
+
+    /// Switch music without opening the island
+    private func showMusicMenu() {
+        let menu = musicMenu()
+        // Showing a menu from a status item means attaching it for one click
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    /// The station menu, shared by the menu bar icon and the Music tile. The
+    /// tile passes `onAddLink` to also offer adding and removing stations.
+    func musicMenu(onAddLink: (() -> Void)? = nil) -> NSMenu {
+        let menu = NSMenu()
+        if let station = music.station {
+            let nowPlaying = music.title ?? station.name
+            let heading = NSMenuItem(title: nowPlaying.count > 52 ? nowPlaying.prefix(51) + "…" : nowPlaying,
+                                     action: nil, keyEquivalent: "")
+            heading.isEnabled = false
+            menu.addItem(heading)
+        }
+        menu.addItem(ClosureMenuItem(title: music.isActive ? "Pause" : "Play") { [weak self] in
+            self?.music.togglePlayPause()
+        })
+        if music.station?.isPlaylist == true {
+            menu.addItem(ClosureMenuItem(title: "Next") { [weak self] in self?.music.next() })
+        }
+        if music.videoID != nil {
+            menu.addItem(ClosureMenuItem(title: "Open in YouTube") { [weak self] in
+                self?.afterClosingIsland { self?.music.openInBrowser() }
+            })
+        }
+        menu.addItem(.separator())
+        for station in music.stations {
+            let item = ClosureMenuItem(title: station.menuTitle) { [weak self] in self?.music.play(station) }
+            item.state = station.id == music.station?.id ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        addRecentlyPlayedItems(to: menu)
+        addYouTubeAccountItems(to: menu)
+        menu.addItem(ClosureMenuItem(title: "Search YouTube…") { [weak self] in
+            guard let self = self else { return }
+            if !self.island.isShown { self.toggleIsland() }
+            self.musicSearch.present()
+        })
+        if let onAddLink = onAddLink {
+            menu.addItem(ClosureMenuItem(title: "Add from YouTube Link…", handler: onAddLink))
+            if !music.customStations.isEmpty {
+                let remove = NSMenuItem(title: "Remove Station", action: nil, keyEquivalent: "")
+                let submenu = NSMenu()
+                for station in music.customStations {
+                    submenu.addItem(ClosureMenuItem(title: station.menuTitle) { [weak self] in
+                        self?.music.removeCustomStation(station)
+                    })
+                }
+                remove.submenu = submenu
+                menu.addItem(remove)
+            }
+        }
+        return menu
+    }
+
+    /// The last stations played, as a submenu so the main menu stays short
+    private func addRecentlyPlayedItems(to menu: NSMenu) {
+        guard !music.recentlyPlayed.isEmpty else { return }
+        let recent = NSMenuItem(title: "Recently Played", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for station in music.recentlyPlayed {
+            let item = ClosureMenuItem(title: station.menuTitle) { [weak self] in self?.music.play(station) }
+            item.state = station.id == music.station?.id ? .on : .off
+            submenu.addItem(item)
+        }
+        submenu.addItem(.separator())
+        submenu.addItem(ClosureMenuItem(title: "Clear Recently Played") { [weak self] in
+            self?.music.clearRecentlyPlayed()
+        })
+        recent.submenu = submenu
+        menu.addItem(recent)
+        menu.addItem(.separator())
+    }
+
+    /// Your own playlists, or the item that connects your YouTube account
+    private func addYouTubeAccountItems(to menu: NSMenu) {
+        let account = youTubeAccount
+        guard account.canSignIn else { return }
+        guard account.isSignedIn else {
+            menu.addItem(ClosureMenuItem(title: "Connect YouTube Account…") { [weak self] in
+                self?.afterClosingIsland { account.signIn() }
+            })
+            menu.addItem(.separator())
+            return
+        }
+        // Picks up playlists made since the last look; shows next time the menu opens
+        Task { await account.refreshPlaylists() }
+
+        let heading = NSMenuItem(title: "Your Playlists", action: nil, keyEquivalent: "")
+        heading.isEnabled = false
+        menu.addItem(heading)
+        if account.playlists.isEmpty {
+            let loading = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
+            loading.isEnabled = false
+            menu.addItem(loading)
+        }
+        for station in account.playlists {
+            let item = ClosureMenuItem(title: station.menuTitle) { [weak self] in self?.music.play(station) }
+            item.state = station.id == music.station?.id ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(ClosureMenuItem(title: "Disconnect YouTube Account") {
+            account.signOut()
+        })
+        menu.addItem(.separator())
     }
 
     private func setupIsland() {
-        island = IslandController(content: ContentView(appDelegate: self, pomodoro: pomodoro, screenRecorder: screenRecorder, bluetooth: bluetooth, system: systemMonitor))
+        island = IslandController(content: ContentView(appDelegate: self, pomodoro: pomodoro, screenRecorder: screenRecorder, bluetooth: bluetooth, system: systemMonitor, music: music, musicSearch: musicSearch))
         island.onDismiss = { [weak self] in
             self?.closeIsland()
         }
@@ -2238,6 +3527,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func closeIsland() {
         guard island.isShown else { return }
+        musicSearch.dismiss()
         island.hide()
         systemMonitor.isIslandShown = false
         removeHighlight()
@@ -2256,8 +3546,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private func startEscapeMonitor() {
         stopEscapeMonitor()
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return event }
+            // The music search takes Esc (back to the tiles), arrows and Return
+            if self.musicSearch.isPresented {
+                return self.musicSearch.handle(event) ? nil : event
+            }
             guard event.keyCode == Constants.Island.escapeKeyCode else { return event }
-            self?.closeIsland()
+            self.closeIsland()
             return nil
         }
     }
@@ -2383,6 +3678,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             image = StatusIcon.onBreak
         } else if shutdownDate != nil {
             image = StatusIcon.shutdown
+        } else if music.isActive {
+            image = StatusIcon.music
         } else {
             image = NookGlyph.image
         }
@@ -2400,6 +3697,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func formatDate(_ date: Date) -> String {
         Self.timeFormatter.string(from: date)
+    }
+}
+
+/// A menu item that runs a closure, for menus built on the fly
+private final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    @objc private func fire() {
+        handler()
     }
 }
 
@@ -2436,15 +3752,24 @@ struct ContentView: View {
     @ObservedObject var screenRecorder: ScreenRecorder
     @ObservedObject var bluetooth: BluetoothManager
     @ObservedObject var system: SystemMonitor
+    @ObservedObject var music: MusicPlayer
+    @ObservedObject var musicSearch: MusicSearch
     @State private var shutdownMinutes = Constants.Shutdown.defaultMinutes
     @State private var showsAllDevices = false
     @State private var showsSystem = false
+    /// The link field shown in the Music tile, nil when it's closed
+    @State private var musicLink: String?
+    @State private var musicLinkError: String?
+    @State private var isAddingMusicLink = false
+    @FocusState private var isSearchFieldFocused: Bool
 
     var body: some View {
         VStack(spacing: Constants.UI.gridSpacing) {
             headerView
             if showsSystem {
                 systemView
+            } else if musicSearch.isPresented {
+                tile(musicSearchView)
             } else {
                 // Two columns of tiles keep the island short enough to fit on screen
                 HStack(alignment: .top, spacing: Constants.UI.gridSpacing) {
@@ -2453,6 +3778,7 @@ struct ContentView: View {
                         tile(powerOffView)
                     }
                     VStack(spacing: Constants.UI.gridSpacing) {
+                        tile(musicView)
                         tile(screenRecordingView)
                         tile(bluetoothView)
                     }
@@ -2611,7 +3937,7 @@ struct ContentView: View {
                             .background(Circle().fill(Color.white.opacity(0.2)))
                     }
                     .buttonStyle(PillButtonStyle())
-                    .hoverTooltip("Turn off Pomodoro")
+                    .help("Turn off Pomodoro")
                 }
             }
 
@@ -2699,7 +4025,9 @@ struct ContentView: View {
                 .trim(from: 0, to: pomodoro.progress)
                 .stroke(Color.white, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: Constants.Time.updateInterval), value: pomodoro.progress)
+                // No animation between ticks: each second moves the ring a
+                // fraction of a point, and a one-second animation restarted
+                // every second would redraw the island on every frame.
             Image(systemName: theme.symbol)
                 .font(.system(size: 18, weight: .semibold))
         }
@@ -2923,7 +4251,7 @@ struct ContentView: View {
             }
             // The subtitle truncates when every battery level is shown, so hovering reveals it in full
             .contentShape(Rectangle())
-            .hoverTooltip("\(device.name)\n\(deviceSubtitle(device))")
+            .help("\(device.name)\n\(deviceSubtitle(device))")
 
             Spacer(minLength: 4)
 
@@ -2954,6 +4282,352 @@ struct ContentView: View {
         guard device.isConnected else { return "Not connected" }
         guard let battery = device.battery else { return "Connected" }
         return "Connected · \(battery)"
+    }
+
+    // MARK: Music
+
+    private var musicView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                sectionLabel("Music", systemImage: "music.note")
+                Spacer()
+                Button(action: { appDelegate.afterClosingIsland(music.openInBrowser) }) {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 24, height: 20)
+                }
+                .buttonStyle(CustomPlainButtonStyle())
+                .cornerRadius(5)
+                .disabled(music.videoID == nil)
+                .opacity(music.videoID == nil ? 0.35 : 1)
+                .accessibilityLabel("Open in YouTube")
+                Button(action: musicSearch.present) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 24, height: 20)
+                }
+                .buttonStyle(CustomPlainButtonStyle())
+                .cornerRadius(5)
+                .accessibilityLabel("Search YouTube")
+            }
+            .frame(minHeight: 20)
+
+            HStack(spacing: 8) {
+                stationMenu
+                Spacer(minLength: 4)
+                musicTransport
+            }
+
+            if musicLink != nil {
+                musicLinkField
+            } else if let notice = music.notice {
+                statusRow(icon: "exclamationmark.triangle", text: notice)
+            } else {
+                // Song titles can be long; one line keeps the tile from jumping
+                musicStatusRow
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Slider(value: $music.volume, in: 0...100)
+                    .controlSize(.small)
+                Image(systemName: "speaker.wave.3.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 12)
+    }
+
+    /// A plain button opening an AppKit menu. SwiftUI's `Menu` is backed by a
+    /// pop-up button that kept re-laying out the hidden island with long titles.
+    private var stationMenu: some View {
+        Button(action: {
+            appDelegate.musicMenu(onAddLink: startAddingMusicLink)
+                .popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        }) {
+            HStack(spacing: 4) {
+                Text(music.stationTitle ?? "Choose a station")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+        }
+        .buttonStyle(CustomPlainButtonStyle())
+        .cornerRadius(5)
+        .frame(width: 190, alignment: .leading)
+    }
+
+    private var musicTransport: some View {
+        let canSkip = music.station?.isPlaylist == true && music.status != .idle
+        return HStack(spacing: 2) {
+            musicButton("backward.fill", label: "Previous", enabled: canSkip, action: music.previous)
+            musicButton(music.isActive ? "pause.fill" : "play.fill", label: music.isActive ? "Pause" : "Play",
+                        enabled: music.station != nil, action: music.togglePlayPause)
+            musicButton("forward.fill", label: "Next", enabled: canSkip, action: music.next)
+        }
+    }
+
+    private func musicButton(_ symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 26, height: 22)
+        }
+        .buttonStyle(CustomPlainButtonStyle())
+        .cornerRadius(5)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .accessibilityLabel(label)
+    }
+
+    @ViewBuilder
+    private var musicStatusRow: some View {
+        switch music.status {
+        case .failed(let message):
+            statusRow(icon: "exclamationmark.triangle", text: message, actionTitle: "Retry", action: music.togglePlayPause)
+        case .loading:
+            // Buffering after a song had started usually means the network dropped
+            statusRow(icon: "hourglass", text: music.title == nil ? "Loading…" : "Reconnecting…")
+        case .idle:
+            statusRow(icon: "music.note", text: "Press play for \(music.station?.name ?? "music")")
+        case .playing, .paused:
+            if music.isUnsaved {
+                statusRow(icon: "magnifyingglass", text: music.title ?? "From search",
+                          actionTitle: "☆ Save", action: music.saveCurrentStation)
+            } else {
+                statusRow(icon: music.status == .playing ? "waveform" : "pause.circle",
+                          text: music.stationDetail ?? music.title ?? "…")
+            }
+        }
+    }
+
+    private var musicLinkField: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                TextField("Paste a YouTube link", text: Binding(
+                    get: { musicLink ?? "" },
+                    set: { musicLink = $0; musicLinkError = nil }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .onSubmit(addMusicLink)
+
+                if isAddingMusicLink {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Add", action: addMusicLink)
+                        .controlSize(.small)
+                        .disabled((musicLink ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                Button(action: { musicLink = nil; musicLinkError = nil }) {
+                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                }
+                .buttonStyle(IconButtonStyle())
+            }
+            if let error = musicLinkError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+        }
+    }
+
+    private func startAddingMusicLink() {
+        // Start from a YouTube link on the clipboard, if there is one
+        let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
+        musicLink = MusicStation.source(fromLink: clipboard) == nil ? "" : clipboard
+        musicLinkError = nil
+    }
+
+    private func addMusicLink() {
+        guard let link = musicLink, !isAddingMusicLink else { return }
+        isAddingMusicLink = true
+        Task { @MainActor in
+            do {
+                try await music.addStation(fromLink: link)
+                musicLink = nil
+            } catch {
+                musicLinkError = (error as? LocalizedError)?.errorDescription ?? "Couldn't add this link"
+            }
+            isAddingMusicLink = false
+        }
+    }
+
+    // MARK: Music Search
+
+    private var musicSearchView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("Search YouTube", text: $musicSearch.query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 15))
+                    .focused($isSearchFieldFocused)
+                if musicSearch.isSearching {
+                    ProgressView().controlSize(.small)
+                }
+                Button(action: musicSearch.dismiss) {
+                    Text("Esc")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                }
+                .buttonStyle(CustomPlainButtonStyle())
+                .cornerRadius(5)
+            }
+            .padding(10)
+            .background(Color.white.opacity(0.08))
+            .cornerRadius(10)
+
+            SegmentedPicker(selection: $musicSearch.filter, options: MusicSearchFilter.allCases) { $0.title }
+
+            if musicSearch.query.trimmingCharacters(in: .whitespaces).isEmpty {
+                recentSearchesView
+            } else if let error = musicSearch.errorMessage, musicSearch.results.isEmpty {
+                statusRow(icon: "exclamationmark.triangle", text: error)
+            } else {
+                searchResultsList
+            }
+
+            Text("↑↓ select · ⏎ play now · ⌘⏎ play and save · Esc back")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 12)
+        .onAppear {
+            // The island has to finish becoming key before the field can focus
+            DispatchQueue.main.async { isSearchFieldFocused = true }
+        }
+    }
+
+    @ViewBuilder
+    private var recentSearchesView: some View {
+        if musicSearch.recentSearches.isEmpty {
+            statusRow(icon: "music.note.list", text: "Try “lofi”, “rain sounds” or “piano for sleep”")
+        } else {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Recent")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button(action: musicSearch.clearRecentSearches) {
+                        Text("Clear")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                    }
+                    .buttonStyle(CustomPlainButtonStyle())
+                    .cornerRadius(5)
+                }
+                ForEach(musicSearch.recentSearches, id: \.self) { recent in
+                    Button(action: { musicSearch.query = recent }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock.arrow.circlepath")
+                            Text(recent)
+                            Spacer()
+                        }
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                    }
+                    .buttonStyle(CustomPlainButtonStyle())
+                    .cornerRadius(6)
+                }
+            }
+        }
+    }
+
+    private var searchResultsList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(Array(musicSearch.results.enumerated()), id: \.element.id) { index, result in
+                        searchResultRow(result, isSelected: index == musicSearch.selection)
+                            .id(result.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture { musicSearch.play(result, saving: false) }
+                            .onHover { if $0 { musicSearch.selection = index } }
+                    }
+                }
+            }
+            .frame(height: 380)
+            .onChange(of: musicSearch.selection) { selection in
+                guard musicSearch.results.indices.contains(selection) else { return }
+                proxy.scrollTo(musicSearch.results[selection].id)
+            }
+        }
+    }
+
+    private func searchResultRow(_ result: MusicSearchResult, isSelected: Bool) -> some View {
+        let problem = musicSearch.unplayable[result.id]
+        return HStack(spacing: 10) {
+            AsyncImage(url: result.thumbnail) { image in
+                image.resizable().aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Color.white.opacity(0.08)
+            }
+            .frame(width: 64, height: 36)
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(result.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Text(problem ?? result.channel)
+                    .font(.caption)
+                    .foregroundColor(problem == nil ? .secondary : .orange)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+
+            if musicSearch.checkingID == result.id {
+                ProgressView().controlSize(.small)
+            } else {
+                searchResultBadge(result)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.white.opacity(isSelected ? 0.14 : 0))
+        .cornerRadius(8)
+        .opacity(problem == nil ? 1 : 0.5)
+    }
+
+    private func searchResultBadge(_ result: MusicSearchResult) -> some View {
+        let isLive = result.kind == .live
+        return HStack(spacing: 4) {
+            if isLive {
+                Circle().fill(Color.red).frame(width: 6, height: 6)
+            } else if result.kind == .playlist {
+                Image(systemName: "music.note.list")
+            }
+            Text(result.detail)
+                .monospacedDigit()
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundColor(isLive ? .red : .secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(Color.white.opacity(0.08)))
     }
 
     // MARK: System
@@ -3251,44 +4925,6 @@ struct CustomPlainButtonStyle: ButtonStyle {
             .onHover { hovering in
                 isHovered = hovering
             }
-    }
-}
-
-// MARK: - Hover Tooltip
-
-/// A tooltip Nook draws itself. System tooltips (`.help`) don't appear inside
-/// a menu bar app's popover, so this shows a small popover after a short hover.
-private struct HoverTooltip: ViewModifier {
-    let text: String
-    @State private var isHovering = false
-    @State private var isShown = false
-
-    func body(content: Content) -> some View {
-        content
-            .onHover { hovering in
-                isHovering = hovering
-                guard hovering else {
-                    isShown = false
-                    return
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + Constants.Tooltip.delay) {
-                    if isHovering { isShown = true }
-                }
-            }
-            .popover(isPresented: $isShown, arrowEdge: .bottom) {
-                Text(text)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .multilineTextAlignment(.leading)
-                    .fixedSize()
-                    .padding(8)
-            }
-    }
-}
-
-extension View {
-    fileprivate func hoverTooltip(_ text: String) -> some View {
-        modifier(HoverTooltip(text: text))
     }
 }
 
@@ -3665,6 +5301,12 @@ struct IslandView<Content: View>: View {
     }
 }
 
+/// Takes the first click even while the panel isn't key, so a button never
+/// needs a second click after focus moved elsewhere.
+private final class IslandHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 private final class IslandPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 
@@ -3679,6 +5321,10 @@ private final class IslandPanel: NSPanel {
 final class IslandController {
     private let model = IslandModel()
     private let panel: IslandPanel
+    /// The panel's content view
+    private let root = NSView()
+    /// Holds the hosting view; in `root` only while the island is on screen
+    private let container = NSView()
     private var pendingHide: DispatchWorkItem?
 
     /// True from the moment the island starts opening until it starts closing
@@ -3700,7 +5346,7 @@ final class IslandController {
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
-        let hostingView = NSHostingView(rootView: IslandView(
+        let hostingView = IslandHostingView(rootView: IslandView(
             model: model,
             onDismiss: { [weak self] in self?.onDismiss?() },
             content: content
@@ -3710,10 +5356,24 @@ final class IslandController {
         // AppKit throws, so wrap it in a plain view instead.
         hostingView.sizingOptions = []
         hostingView.autoresizingMask = [.width, .height]
-        let container = NSView()
+        container.autoresizingMask = [.width, .height]
         container.addSubview(hostingView)
-        panel.contentView = container
-        hostingView.frame = container.bounds
+        panel.contentView = root
+    }
+
+    /// SwiftUI keeps updating a hosting view whose window is merely ordered
+    /// out, so anything animating inside the content (like the Pomodoro ring,
+    /// whose one-second animation restarts every second) would re-lay out the
+    /// island on every frame while it's closed. A hosting view outside any
+    /// window stays idle and keeps its state, so it's only attached while the
+    /// island is on screen.
+    private func attachContent() {
+        guard container.superview == nil else { return }
+        container.frame = root.bounds
+        container.subviews.first?.frame = container.bounds
+        root.addSubview(container)
+        // Draw the collapsed island first so opening animates from the notch
+        container.layoutSubtreeIfNeeded()
     }
 
     func show(on screen: NSScreen) {
@@ -3721,6 +5381,7 @@ final class IslandController {
         pendingHide = nil
         model.notchSize = Self.notchSize(of: screen)
         layoutPanel(on: screen)
+        attachContent()
         panel.orderFrontRegardless()
         panel.makeKey()
         withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) {
@@ -3736,6 +5397,7 @@ final class IslandController {
         // Take the panel off screen once it has folded back into the notch
         let work = DispatchWorkItem { [weak self] in
             self?.panel.orderOut(nil)
+            self?.container.removeFromSuperview()
         }
         pendingHide = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Constants.Island.closeDuration, execute: work)

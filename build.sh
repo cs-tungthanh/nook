@@ -21,6 +21,17 @@ if [ -n "${NOOK_VERSION:-}" ]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${NOOK_VERSION}" Nook.app/Contents/Info.plist
 fi
 
+# Nook's Google OAuth client ID (an "iOS" client for com.nook.app), which lets
+# Music sign in to YouTube and list your playlists. Taken from the environment
+# or from the gitignored .env file, so it stays out of the repo. Without it,
+# the build works but can't connect a YouTube account.
+if [ -z "${NOOK_YOUTUBE_CLIENT_ID:-}" ] && [ -f .env ]; then
+    NOOK_YOUTUBE_CLIENT_ID="$(sed -n 's/^NOOK_YOUTUBE_CLIENT_ID=//p' .env | tail -1 | tr -d "\"' ")"
+fi
+if [ -n "${NOOK_YOUTUBE_CLIENT_ID:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Add :NookYouTubeClientID string ${NOOK_YOUTUBE_CLIENT_ID}" Nook.app/Contents/Info.plist
+fi
+
 # Copy the app icon (regenerate with icon/make-icon.swift)
 mkdir -p Nook.app/Contents/Resources
 cp icon/AppIcon.icns Nook.app/Contents/Resources/
