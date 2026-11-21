@@ -14,8 +14,12 @@ swiftc -O \
     -o Nook.app/Contents/MacOS/Nook \
     Nook.swift
 
-# Copy Info.plist
+# Copy Info.plist, stamping the version when NOOK_VERSION is set (release builds)
 cp Info.plist Nook.app/Contents/
+if [ -n "${NOOK_VERSION:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${NOOK_VERSION}" Nook.app/Contents/Info.plist
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${NOOK_VERSION}" Nook.app/Contents/Info.plist
+fi
 
 # Copy the app icon (regenerate with icon/make-icon.swift)
 mkdir -p Nook.app/Contents/Resources

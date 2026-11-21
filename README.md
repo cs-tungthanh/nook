@@ -72,7 +72,15 @@ Nook is built around a few simple principles:
 
 ## 🚀 Getting Started
 
-### Requirements
+### Install with Homebrew
+
+```bash
+brew install --cask cs-tungthanh/tap/nook
+```
+
+Update with `brew upgrade --cask nook`; remove with `brew uninstall --cask nook`. The cask needs an Apple silicon Mac.
+
+### Requirements for building
 
 - macOS 13 (Ventura) or later
 - Swift compiler (comes with Xcode or the Command Line Tools)
@@ -114,6 +122,26 @@ Close Edge completely before running the bookmark updater with `-apply`, because
 
 The updater checks links in a fresh, signed-out Edge profile, so it doesn't use Edge's built-in VPN (Secure Network). If your network blocks a site, the check fails with `SKIP: page failed to load: ERR_CONNECTION_REFUSED`, even though the site opens in your normal Edge. Pass `-proxy` to send the check through a proxy or VPN, for example `-proxy socks5://127.0.0.1:1080`. Supported schemes are `http`, `https`, `socks4` and `socks5`, without a username or password.
 
+### Releasing
+
+Push a version tag:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+The [Release workflow](.github/workflows/release.yml) builds Nook with that version, attaches `Nook-1.0.0.zip` to a GitHub release, and updates `Casks/nook.rb` in [cs-tungthanh/homebrew-tap](https://github.com/cs-tungthanh/homebrew-tap) from the template in `packaging/homebrew/nook.rb`.
+
+It uses these repository secrets:
+
+| Secret | Required | What it is |
+|---|---|---|
+| `HOMEBREW_TAP_TOKEN` | Yes | A fine-grained token with **Contents: read and write** on `homebrew-tap` |
+| `MACOS_CERT_P12` | No | Your signing certificate exported as `.p12`, base64-encoded |
+| `MACOS_CERT_PASSWORD` | No | The `.p12` export password |
+
+Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Screen Recording and Microphone permissions after every upgrade. Nook isn't notarized, so the cask clears the quarantine flag after install so Gatekeeper lets it open.
+
 ### Project layout
 
 | Path | What it is |
@@ -122,6 +150,8 @@ The updater checks links in a fresh, signed-out Edge profile, so it doesn't use 
 | `Info.plist` | App bundle settings |
 | `build.sh` | Compiles, bundles and signs `Nook.app` |
 | `install.sh` | Builds and reinstalls Nook in `/Applications` (`--uninstall` removes it) |
+| `packaging/homebrew/` | Template for the Homebrew cask |
+| `.github/workflows/release.yml` | Builds a release and updates the Homebrew tap when a `v*` tag is pushed |
 | `icon/` | App icon and the script that draws it (`swift icon/make-icon.swift`) |
 | `screenshots/` | Images of the island used in this README |
 | `clean-zsh/` | Zsh history cleaner |
