@@ -14,8 +14,13 @@ swiftc -O \
     -o Nook.app/Contents/MacOS/Nook \
     Nook.swift
 
-# Copy Info.plist, stamping the version when NOOK_VERSION is set (release builds)
+# Copy Info.plist, stamping the version. Release builds set NOOK_VERSION; a
+# local build takes the latest release tag, so Nook's update check sees it as
+# current instead of offering to replace it with the published release.
 cp Info.plist Nook.app/Contents/
+if [ -z "${NOOK_VERSION:-}" ]; then
+    NOOK_VERSION="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || true)"
+fi
 if [ -n "${NOOK_VERSION:-}" ]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${NOOK_VERSION}" Nook.app/Contents/Info.plist
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${NOOK_VERSION}" Nook.app/Contents/Info.plist
