@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func commandOf(line string) string {
@@ -19,6 +20,33 @@ func commandOf(line string) string {
 	return line
 }
 
+// groupEntries joins the physical lines of the history file into entries.
+// Zsh saves a multi-line command as lines ending in a backslash, so a line
+// ending in an odd number of backslashes continues on the next line.
+func groupEntries(lines []string) []string {
+	var entries []string
+	var current []string
+	for _, line := range lines {
+		current = append(current, line)
+		if !continues(line) {
+			entries = append(entries, strings.Join(current, "\n"))
+			current = nil
+		}
+	}
+	if len(current) > 0 {
+		entries = append(entries, strings.Join(current, "\n"))
+	}
+	return entries
+}
+
+func continues(line string) bool {
+	n := 0
+	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
+}
+
 func main() {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -29,6 +57,14 @@ func main() {
 	if len(os.Args) > 1 {
 		histFile = os.Args[1]
 	}
+
+	// Hold zsh's own history lock so a shell can't append between the read
+	// and the rename; those entries would be lost.
+	unlock, err := lockHistory(histFile)
+	if err != nil {
+		panic(err)
+	}
+	defer unlock()
 
 	file, err := os.Open(histFile)
 	if err != nil {
@@ -51,17 +87,19 @@ func main() {
 		panic(closeErr)
 	}
 
+	entries := groupEntries(lines)
+
 	// Record the last occurrence of each command.
-	last := make(map[string]int, len(lines))
-	for i, line := range lines {
-		last[commandOf(line)] = i
+	last := make(map[string]int, len(entries))
+	for i, entry := range entries {
+		last[commandOf(entry)] = i
 	}
 
 	// Keep only the latest occurrence, preserving order.
 	var cleaned []string
-	for i, line := range lines {
-		if last[commandOf(line)] == i {
-			cleaned = append(cleaned, line)
+	for i, entry := range entries {
+		if last[commandOf(entry)] == i {
+			cleaned = append(cleaned, entry)
 		}
 	}
 
@@ -103,10 +141,31 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("Original entries: %d\n", len(lines))
+	fmt.Printf("Original entries: %d\n", len(entries))
 	fmt.Printf("Remaining entries: %d\n", len(cleaned))
-	fmt.Printf("Removed duplicates: %d\n", len(lines)-len(cleaned))
+	fmt.Printf("Removed duplicates: %d\n", len(entries)-len(cleaned))
 	fmt.Printf("Backup: %s\n", backup)
+}
+
+// lockHistory takes the HISTFILE.LOCK file zsh uses (with the default
+// HIST_FCNTL_LOCK unset), waiting a few seconds for a shell holding it.
+func lockHistory(histFile string) (func(), error) {
+	lock := histFile + ".LOCK"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			f.Close()
+			return func() { os.Remove(lock) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("%s is held by another shell; try again, or remove it if no shell is writing history", lock)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func copyFile(src, dst string) error {
