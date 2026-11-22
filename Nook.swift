@@ -5912,7 +5912,7 @@ final class IslandModel: ObservableObject {
 }
 
 /// Grows its content out of the notch: a black notch-sized pill springs open
-/// to the content's size while the content fades and un-blurs into place.
+/// to the content's size while the content fades and scales into place.
 /// Clicking the empty space around it calls `onDismiss`.
 struct IslandView<Content: View>: View {
     @ObservedObject var model: IslandModel
@@ -5934,7 +5934,8 @@ struct IslandView<Content: View>: View {
                 .padding(.horizontal, Constants.Island.flareRadius)
                 .fixedSize()
                 .opacity(expanded ? 1 : 0)
-                .blur(radius: expanded ? 0 : 12)
+                // No blur here: an animated blur re-renders and blurs the whole
+                // content offscreen on every frame, which made opening stutter
                 .scaleEffect(expanded ? 1 : 0.7, anchor: .top)
                 .mask(GeometryReader { proxy in
                     islandShape(fitting: proxy.size)
@@ -5994,7 +5995,7 @@ final class IslandController {
     private var pendingHide: DispatchWorkItem?
 
     /// True from the moment the island starts opening until it starts closing
-    var isShown: Bool { model.isExpanded }
+    private(set) var isShown = false
 
     /// Called when the user clicks the empty space around the open island
     var onDismiss: (() -> Void)?
@@ -6045,18 +6046,48 @@ final class IslandController {
     func show(on screen: NSScreen) {
         pendingHide?.cancel()
         pendingHide = nil
+        isShown = true
         model.notchSize = Self.notchSize(of: screen)
         layoutPanel(on: screen)
+        let isStillClosing = container.superview != nil
         attachContent()
         panel.orderFrontRegardless()
         panel.makeKey()
-        withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) {
+
+        // Reopened before it finished folding away: grow from where it is
+        if isStillClosing {
+            expand()
+            return
+        }
+
+        // A hosting view put back in the window hasn't drawn anything yet, and
+        // the close animation may not have settled before it was detached. If
+        // the island expanded in this same pass, SwiftUI would never show the
+        // collapsed island and would jump straight to open (every open after
+        // the first). So settle on the collapsed island, draw it, and only
+        // start growing on the next pass of the run loop.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            model.isExpanded = false
+        }
+        container.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.isShown else { return }
+            self.expand()
+        }
+    }
+
+    private func expand() {
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
             model.isExpanded = true
         }
     }
 
     func hide() {
-        guard model.isExpanded else { return }
+        guard isShown else { return }
+        isShown = false
         withAnimation(.spring(response: 0.35, dampingFraction: 0.92)) {
             model.isExpanded = false
         }
