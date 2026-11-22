@@ -4351,12 +4351,20 @@ struct ContentView: View {
 
     private var headerView: some View {
         HStack(spacing: 8) {
-            Image(nsImage: NookGlyph.image)
-                .renderingMode(.template)
-                .resizable()
-                .frame(width: 20, height: 20)
-            Text(page == .system ? "System" : page == .about ? "About Nook" : "Nook")
-                .font(.headline)
+            // The icon and title lead back to the tiles from any other page
+            Button(action: showHome) {
+                HStack(spacing: 8) {
+                    Image(nsImage: NookGlyph.image)
+                        .renderingMode(.template)
+                        .resizable()
+                        .frame(width: 20, height: 20)
+                    Text(page == .system ? "System" : page == .about ? "About Nook" : "Nook")
+                        .font(.headline)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Back to Nook")
             Spacer()
             if let release = updater.availableRelease, page != .about {
                 Button(action: { setPage(.about) }) {
@@ -5214,6 +5222,12 @@ struct ContentView: View {
     private func setPage(_ newPage: Page) {
         page = newPage
         system.isPageShown = newPage == .system
+    }
+
+    /// The default view: the Utilities tiles, with music search closed
+    private func showHome() {
+        if musicSearch.isPresented { musicSearch.dismiss() }
+        if page != .utilities { setPage(.utilities) }
     }
 
     // MARK: About
