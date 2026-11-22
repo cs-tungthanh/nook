@@ -2572,6 +2572,7 @@ final class YouTubeAccount: NSObject, ObservableObject {
         accessToken = nil
         accessTokenExpiry = .distantPast
         playlists = []
+        videoCache = [:]
         isSignedIn = false
     }
 
@@ -2685,21 +2686,43 @@ final class YouTubeAccount: NSObject, ObservableObject {
         }
     }
 
-    /// The video IDs in one of your playlists, private ones included, in order
+    struct PlaylistVideo: Equatable {
+        let id: String
+        let title: String
+    }
+
+    /// Videos read this session, by playlist ID, so the menu opens a
+    /// playlist instantly the second time
+    private var videoCache: [String: (videos: [PlaylistVideo], loaded: Date)] = [:]
+
+    /// The videos last read for a playlist, if any, however old
+    func cachedVideos(in playlistID: String) -> [PlaylistVideo]? {
+        videoCache[playlistID]?.videos
+    }
+
+    /// The videos in one of your playlists, private ones included, in order.
+    /// Reads again once the cached copy is a minute old.
     @MainActor
-    func videoIDs(in playlistID: String) async throws -> [String] {
-        var ids: [String] = []
+    func videos(in playlistID: String) async throws -> [PlaylistVideo] {
+        if let cached = videoCache[playlistID], Date().timeIntervalSince(cached.loaded) < 60 {
+            return cached.videos
+        }
+        var videos: [PlaylistVideo] = []
         var pageToken: String?
         repeat {
-            var query = ["part": "contentDetails", "playlistId": playlistID, "maxResults": "50"]
+            var query = ["part": "snippet,contentDetails", "playlistId": playlistID, "maxResults": "50"]
             query["pageToken"] = pageToken
             let page = try await get("playlistItems", query)
             for item in page["items"] as? [[String: Any]] ?? [] {
-                if let id = YouTube.dig(item, "contentDetails", "videoId") as? String { ids.append(id) }
+                guard let id = YouTube.dig(item, "contentDetails", "videoId") as? String else { continue }
+                let title = YouTube.dig(item, "snippet", "title") as? String ?? "Untitled video"
+                videos.append(PlaylistVideo(id: id, title: title))
             }
             pageToken = page["nextPageToken"] as? String
-        } while pageToken != nil && ids.count < Self.maxVideos
-        return Array(ids.prefix(Self.maxVideos))
+        } while pageToken != nil && videos.count < Self.maxVideos
+        videos = Array(videos.prefix(Self.maxVideos))
+        videoCache[playlistID] = (videos, Date())
+        return videos
     }
 
     @MainActor
@@ -2911,9 +2934,15 @@ final class MusicPlayer: NSObject, ObservableObject {
         play(newStation, resuming: false)
     }
 
+    /// Plays a playlist from its `index`th video (counting from 0), so Next
+    /// and Previous still move through the rest of it
+    func play(_ newStation: MusicStation, startingAt index: Int) {
+        play(newStation, resuming: false, startIndex: index)
+    }
+
     /// With `resuming`, the player picks up where it was before the last
     /// switch: same playlist entry, same moment
-    private func play(_ newStation: MusicStation, resuming: Bool) {
+    private func play(_ newStation: MusicStation, resuming: Bool, startIndex: Int = 0) {
         if let station = station, station != newStation, status == .playing || status == .paused {
             fallback = Fallback(station: station, status: status, title: title, channel: channel, videoID: videoID)
         }
@@ -2928,7 +2957,7 @@ final class MusicPlayer: NSObject, ObservableObject {
         loadTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
             do {
-                let item = try await self.playerItem(for: newStation)
+                let item = try await self.playerItem(for: newStation, startIndex: startIndex)
                 guard !Task.isCancelled, self.station == newStation else { return }
                 self.load(item, resuming: resuming)
             } catch {
@@ -3027,17 +3056,17 @@ final class MusicPlayer: NSObject, ObservableObject {
 
     /// The JS object `nook.load` takes: a video or a playlist to start.
     /// Built as JSON so no ID can break out of the JavaScript it's put in.
-    private func playerItem(for station: MusicStation) async throws -> String {
+    private func playerItem(for station: MusicStation, startIndex: Int = 0) async throws -> String {
         switch station.source {
         case .video(let id):
             return try Self.jsObject(["videoId": id])
         case .playlist(let id):
-            return try Self.jsObject(["list": id])
+            return try Self.jsObject(["list": id, "index": startIndex])
         case .accountPlaylist(let id):
             guard let account = account else { throw MusicError.signIn }
-            let ids = try await account.videoIDs(in: id)
+            let ids = try await account.videos(in: id).map(\.id)
             guard !ids.isEmpty else { throw MusicError.emptyPlaylist }
-            return try Self.jsObject(["videos": ids])
+            return try Self.jsObject(["videos": ids, "index": min(max(startIndex, 0), ids.count - 1)])
         case .liveSearch(let query):
             if let id = liveStreams[query] { return try Self.jsObject(["videoId": id]) }
             guard let stream = try await YouTube.search(query, filter: .live).first(where: { $0.kind == .live }) else {
@@ -3192,7 +3221,7 @@ final class MusicPlayer: NSObject, ObservableObject {
           load(item, autoplay, resume) {
             // Where the outgoing station was, so a failed switch can return to it
             const here = { index: Math.max(0, player.getPlaylistIndex()), time: player.getCurrentTime() || 0 };
-            const at = resume && resumePoint ? resumePoint : { index: 0, time: 0 };
+            const at = resume && resumePoint ? resumePoint : { index: item.index || 0, time: 0 };
             resumePoint = resume ? null : here;
             const start = play => {
               if (play) {
@@ -4002,8 +4031,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             menu.addItem(loading)
         }
         for station in account.playlists {
-            let item = ClosureMenuItem(title: station.menuTitle) { [weak self] in self?.music.play(station) }
+            guard case .accountPlaylist(let listID) = station.source else { continue }
+            let item = NSMenuItem(title: station.menuTitle, action: nil, keyEquivalent: "")
             item.state = station.id == music.station?.id ? .on : .off
+            item.submenu = PlaylistVideosMenu(station: station, listID: listID, account: account, music: music)
             menu.addItem(item)
         }
         menu.addItem(ClosureMenuItem(title: "Disconnect YouTube Account") {
@@ -4242,6 +4273,78 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 }
 
 /// A menu item that runs a closure, for menus built on the fly
+/// One of your playlists as a submenu: Play All, then each video in order,
+/// so you can start from any of them. The videos load when the submenu
+/// first opens and fill in while it's showing.
+private final class PlaylistVideosMenu: NSMenu, NSMenuDelegate {
+    private let station: MusicStation
+    private let listID: String
+    private let account: YouTubeAccount
+    private let music: MusicPlayer
+    private var loadTask: Task<Void, Never>?
+
+    init(station: MusicStation, listID: String, account: YouTubeAccount, music: MusicPlayer) {
+        self.station = station
+        self.listID = listID
+        self.account = account
+        self.music = music
+        super.init(title: station.name)
+        delegate = self
+        rebuild(videos: account.cachedVideos(in: listID), error: nil)
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard loadTask == nil else { return }
+        loadTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            do {
+                self.rebuild(videos: try await self.account.videos(in: self.listID), error: nil)
+            } catch {
+                // Keep showing an older list if there is one
+                if self.account.cachedVideos(in: self.listID) == nil {
+                    self.rebuild(videos: nil, error: error)
+                }
+            }
+        }
+    }
+
+    private func rebuild(videos: [YouTubeAccount.PlaylistVideo]?, error: Error?) {
+        removeAllItems()
+        let isThisPlaylist = music.station?.id == station.id
+        addItem(ClosureMenuItem(title: "Play All") { [music, station] in music.play(station) })
+        addItem(.separator())
+        guard let videos = videos else {
+            let text = error.map { ($0 as? LocalizedError)?.errorDescription ?? $0.localizedDescription } ?? "Loading videos…"
+            let status = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+            status.isEnabled = false
+            addItem(status)
+            return
+        }
+        guard !videos.isEmpty else {
+            let empty = NSMenuItem(title: MusicError.emptyPlaylist.errorDescription ?? "", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            addItem(empty)
+            return
+        }
+        let limit = 56
+        for (index, video) in videos.enumerated() {
+            let name = video.title.count > limit
+                ? video.title.prefix(limit - 1).trimmingCharacters(in: .whitespaces) + "…"
+                : video.title
+            let item = ClosureMenuItem(title: "\(index + 1).  \(name)") { [music, station] in
+                music.play(station, startingAt: index)
+            }
+            item.toolTip = video.title
+            item.state = isThisPlaylist && music.videoID == video.id ? .on : .off
+            addItem(item)
+        }
+    }
+}
+
 private final class ClosureMenuItem: NSMenuItem {
     private let handler: () -> Void
 

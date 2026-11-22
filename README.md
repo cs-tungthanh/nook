@@ -81,7 +81,7 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 - Switching stations fades the old music out. If something can't play outside YouTube, Nook says so and goes back to what was playing.
 - Music keeps playing with the island closed, with a ♪ icon in the menu bar. Right-click the menu bar icon to play, pause or switch stations.
 - Press ↗ to open what's playing on youtube.com at the same moment; Nook pauses so the two don't overlap.
-- **Connect YouTube Account** adds your Liked videos and playlists, private ones included. Sign-in happens in your browser, Nook only reads your account, and the sign-in is kept in your Keychain.
+- **Connect YouTube Account** adds your Liked videos and playlists, private ones included. Each playlist opens a list of its videos: choose **Play All**, or pick a video to start the playlist from there. Sign-in happens in your browser, Nook only reads your account, and the sign-in is kept in your Keychain.
 - Videos play through YouTube's own player, so YouTube's ads may play too.
 
 </details>
