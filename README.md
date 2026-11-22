@@ -86,10 +86,11 @@ Nook is built around a few simple principles:
 ### Install with Homebrew
 
 ```bash
-brew install --cask cs-tungthanh/tap/nook
+brew tap cs-tungthanh/tap
+brew install nook
 ```
 
-Update with `brew upgrade --cask nook`; remove with `brew uninstall --cask nook`. The cask needs an Apple silicon Mac.
+`brew tap` adds the [cs-tungthanh/tap](https://github.com/cs-tungthanh/homebrew-tap) catalog once; after that, update with `brew upgrade nook` and remove with `brew uninstall nook`. Nook needs an Apple silicon Mac.
 
 ### Requirements for building
 
@@ -165,6 +166,7 @@ It uses these repository secrets:
 | `HOMEBREW_TAP_TOKEN` | Yes | A fine-grained token with **Contents: read and write** on `homebrew-tap` |
 | `MACOS_CERT_P12` | No | Your signing certificate exported as `.p12`, base64-encoded |
 | `MACOS_CERT_PASSWORD` | No | The `.p12` export password |
+| `NOOK_YOUTUBE_CLIENT_ID` | No | The Google OAuth client ID from [Connect YouTube](#connect-youtube); without it, releases don't offer **Connect YouTube Account** |
 
 Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Screen Recording and Microphone permissions after every upgrade. Nook isn't notarized, so the cask clears the quarantine flag after install so Gatekeeper lets it open.
 

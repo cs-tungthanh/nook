@@ -42,11 +42,21 @@ cp icon/AppIcon.icns Nook.app/Contents/Resources/
 # tied to the signature, and an ad-hoc one changes on every build, so macOS
 # would forget the grant after each rebuild. Override with NOOK_SIGN_IDENTITY
 # (use "-" to force ad-hoc).
-SIGN_IDENTITY="${NOOK_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+# Prefers Developer ID or Apple Development, but any valid code signing
+# identity (Apple Distribution, Mac Developer, a self-signed one) still beats
+# ad-hoc, since its signature stays the same between builds.
+IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+SIGN_IDENTITY="${NOOK_SIGN_IDENTITY:-$(printf '%s\n' "$IDENTITIES" \
     | awk '/"Apple Development|"Developer ID Application/ { print $2; exit }')}"
+if [ -z "$SIGN_IDENTITY" ]; then
+    SIGN_IDENTITY="$(printf '%s\n' "$IDENTITIES" | awk '/^ *[0-9]+\) [0-9A-F]{40} / { print $2; exit }')"
+fi
 if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="-"
     echo "No signing certificate found; signing ad-hoc (privacy permissions reset on every build)."
+elif [ "$SIGN_IDENTITY" != "-" ]; then
+    # The hash only: the certificate name carries an email, and release logs are public
+    echo "Signing with identity $SIGN_IDENTITY"
 fi
 codesign --force --deep --sign "$SIGN_IDENTITY" Nook.app
 

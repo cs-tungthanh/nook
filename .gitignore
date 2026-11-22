@@ -28,3 +28,6 @@ vendor/
 # Env / secrets
 .env
 .env.*
+
+# Downloaded Google OAuth client files
+.credentials/

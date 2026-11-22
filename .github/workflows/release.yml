@@ -20,6 +20,9 @@ jobs:
       # Without it, the build is signed ad-hoc.
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      # Optional: the Google OAuth client ID behind Connect YouTube Account.
+      # Without it, released builds don't offer that menu item.
+      NOOK_YOUTUBE_CLIENT_ID: ${{ secrets.NOOK_YOUTUBE_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v4
 
