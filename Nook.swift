@@ -159,6 +159,8 @@ private enum Constants {
         static let recentSearchLimit = 10
         /// Stations kept in "Recently Played"
         static let recentlyPlayedLimit = 15
+        /// How far the rewind and forward buttons jump
+        static let seekStepSeconds = 10.0
         /// "Long" results: YouTube's own filter means over 20 minutes
         static let longMinimumSeconds = 3600
         /// A player this small starts at YouTube's lowest video quality, so it
@@ -2823,6 +2825,24 @@ private enum Keychain {
     }
 }
 
+/// Where the video playing now is, reported by the player about once a
+/// second. Kept apart from `MusicPlayer` so only the progress bar redraws
+/// that often, not everything watching the player.
+final class MusicProgress: ObservableObject {
+    @Published fileprivate(set) var time: Double = 0
+    @Published fileprivate(set) var duration: Double = 0
+    @Published fileprivate(set) var isLive = false
+
+    /// A live stream has no fixed end to seek within
+    var canSeek: Bool { !isLive && duration > 0 }
+
+    fileprivate func reset() {
+        time = 0
+        duration = 0
+        isLive = false
+    }
+}
+
 final class MusicPlayer: NSObject, ObservableObject {
     enum Status: Equatable {
         case idle
@@ -2861,6 +2881,8 @@ final class MusicPlayer: NSObject, ObservableObject {
 
     /// Called whenever playback starts or stops, so the menu bar can refresh
     var onChange: (() -> Void)?
+    /// Position and length of the video playing now
+    let progress = MusicProgress()
     /// Plays your own playlists, when you've connected YouTube
     weak var account: YouTubeAccount?
 
@@ -2905,6 +2927,9 @@ final class MusicPlayer: NSObject, ObservableObject {
     /// so a fresh stream that also fails falls back instead of looping
     private var isRetryingLiveSearch = false
     private var loadTask: Task<Void, Never>?
+    /// Set from a seek until the player settles, so its brief buffering
+    /// doesn't show as "Reconnecting…"
+    private var isSeeking = false
     /// What played before the current station; it comes back if the new one can't play
     private var fallback: Fallback?
 
@@ -2950,6 +2975,8 @@ final class MusicPlayer: NSObject, ObservableObject {
         title = nil
         channel = nil
         videoID = nil
+        progress.reset()
+        isSeeking = false
         status = .loading
         save(newStation, forKey: Constants.Music.Keys.lastStation)
 
@@ -2989,6 +3016,20 @@ final class MusicPlayer: NSObject, ObservableObject {
     }
 
     func next() { run("nook.next()") }
+
+    /// Jumps to `seconds` into the video playing now
+    func seek(to seconds: Double) {
+        guard progress.canSeek else { return }
+        let target = min(max(seconds, 0), max(progress.duration - 1, 0))
+        progress.time = target
+        isSeeking = true
+        run("nook.seek(\(target))")
+    }
+
+    /// Rewinds (negative) or skips forward by `seconds`
+    func skip(by seconds: Double) {
+        seek(to: progress.time + seconds)
+    }
 
     /// Opens the video playing now on youtube.com in the default browser, at
     /// the same moment, and pauses Nook so the two don't play over each other
@@ -3182,14 +3223,25 @@ final class MusicPlayer: NSObject, ObservableObject {
         <script src="https://www.youtube.com/iframe_api"></script>
         <script>
         const post = message => window.webkit.messageHandlers.nook.postMessage(message);
-        let player, fadeTimer, pendingStart, resumePoint, volume = \(Int(volume));
+        let player, fadeTimer, pendingStart, resumePoint, lastReport, volume = \(Int(volume));
+
+        // Tells Nook where the video is, only when the shown second changes
+        function reportTime() {
+          if (!player || !player.getDuration) { return; }
+          const time = player.getCurrentTime() || 0, duration = player.getDuration() || 0;
+          const live = !!(player.getVideoData() || {}).isLive;
+          const key = Math.floor(time) + '/' + Math.floor(duration) + '/' + live;
+          if (key === lastReport) { return; }
+          lastReport = key;
+          post({ event: 'time', time: time, duration: duration, live: live });
+        }
 
         function onYouTubeIframeAPIReady() {
           player = new YT.Player('player', {
             width: \(Int(size.width)), height: \(Int(size.height)),
             playerVars: { autoplay: 1, controls: 0, disablekb: 1, origin: '\(Constants.Music.origin)' },
             events: {
-              onReady: () => { player.setVolume(volume); post({ event: 'ready' }); },
+              onReady: () => { player.setVolume(volume); post({ event: 'ready' }); setInterval(reportTime, 1000); },
               onStateChange: e => post({ event: 'state', state: e.data, title: (player.getVideoData() || {}).title || '', channel: (player.getVideoData() || {}).author || '', videoId: (player.getVideoData() || {}).video_id || '' }),
               onError: e => post({ event: 'error', code: e.data })
             }
@@ -3244,6 +3296,7 @@ final class MusicPlayer: NSObject, ObservableObject {
             else { player.pauseVideo(); }
           },
           next() { player.nextVideo(); },
+          seek(seconds) { if (!pendingStart) { player.seekTo(seconds, true); lastReport = null; } },
           previous() { player.previousVideo(); },
           // During a fade only remember the volume; the new station starts at it
           setVolume(value) { volume = value; if (!pendingStart) { player.setVolume(value); } }
@@ -3274,19 +3327,31 @@ final class MusicPlayer: NSObject, ObservableObject {
             // YT.PlayerState: -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued
             switch event["state"] as? Int {
             case 1:
+                isSeeking = false
                 status = .playing
                 fallback = nil
                 isRetryingLiveSearch = false
                 if let station = station { remember(station) }
             case 0, 2, 5:
+                isSeeking = false
                 // An ended live stream is gone for good
                 if event["state"] as? Int == 0 { forgetLiveStream() }
                 if status != .loading || event["state"] as? Int == 0 { status = .paused }
             case 3, -1:
-                if status != .paused { status = .loading }
+                if status != .paused, !isSeeking { status = .loading }
             default:
                 break
             }
+        case "time":
+            // A new station is on its way: the old video's last ticks don't count
+            guard status != .loading || isSeeking else { return }
+            let isLiveSearch: Bool = {
+                if case .liveSearch = station?.source { return true }
+                return false
+            }()
+            progress.isLive = (event["live"] as? Bool ?? false) || isLiveSearch
+            progress.duration = event["duration"] as? Double ?? 0
+            if !isSeeking { progress.time = event["time"] as? Double ?? 0 }
         case "error":
             couldNotPlay(MusicError.player(event["code"] as? Int ?? 0))
         default:
@@ -3952,6 +4017,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         })
         if music.station?.isPlaylist == true {
             menu.addItem(ClosureMenuItem(title: "Next") { [weak self] in self?.music.next() })
+        }
+        if music.progress.canSeek {
+            let step = Constants.Music.seekStepSeconds
+            menu.addItem(ClosureMenuItem(title: "Back \(Int(step)) Seconds") { [weak self] in self?.music.skip(by: -step) })
+            menu.addItem(ClosureMenuItem(title: "Forward \(Int(step)) Seconds") { [weak self] in self?.music.skip(by: step) })
         }
         if music.videoID != nil {
             menu.addItem(ClosureMenuItem(title: "Open in YouTube") { [weak self] in
@@ -5020,6 +5090,8 @@ struct ContentView: View {
                     .lineLimit(1)
             }
 
+            MusicProgressRow(music: music, progress: music.progress)
+
             HStack(spacing: 8) {
                 Image(systemName: "speaker.fill")
                     .font(.caption)
@@ -5693,6 +5765,92 @@ struct IconButtonStyle: ButtonStyle {
             .onHover { hovering in
                 isHovered = hovering
             }
+    }
+}
+
+/// Rewind, a seek bar with the time on either side, and forward. Shown only
+/// while a video that can be seeked is playing; live streams hide it.
+private struct MusicProgressRow: View {
+    let music: MusicPlayer
+    @ObservedObject var progress: MusicProgress
+    /// Where the knob is while it's being dragged; the player's own reports
+    /// would otherwise pull it back mid-drag
+    @State private var dragTime: Double?
+    @State private var isHovering = false
+
+    var body: some View {
+        if progress.canSeek {
+            HStack(spacing: 6) {
+                skipButton("gobackward.10", label: "Back 10 seconds", by: -Constants.Music.seekStepSeconds)
+                timeLabel(dragTime ?? progress.time)
+                seekBar
+                timeLabel(progress.duration)
+                skipButton("goforward.10", label: "Forward 10 seconds", by: Constants.Music.seekStepSeconds)
+            }
+        }
+    }
+
+    /// Click anywhere on the bar to jump there, or drag to scrub. The jump
+    /// happens on release, so scrubbing doesn't seek on every pixel.
+    private var seekBar: some View {
+        GeometryReader { geometry in
+            let width = max(geometry.size.width, 1)
+            let fraction = CGFloat(min(max((dragTime ?? progress.time) / progress.duration, 0), 1))
+            let isActive = isHovering || dragTime != nil
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(height: isActive ? 5 : 3)
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: width * fraction, height: isActive ? 5 : 3)
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 10, height: 10)
+                    .offset(x: width * fraction - 5)
+                    .opacity(isActive ? 1 : 0)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        dragTime = Double(min(max(value.location.x / width, 0), 1)) * progress.duration
+                    }
+                    .onEnded { value in
+                        music.seek(to: Double(min(max(value.location.x / width, 0), 1)) * progress.duration)
+                        dragTime = nil
+                    }
+            )
+            .onHover { isHovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: isActive)
+        }
+        .frame(height: 16)
+        .accessibilityElement()
+        .accessibilityLabel("Position")
+        .accessibilityValue(TimeRemaining(from: progress.time).clockFormat)
+        .accessibilityAdjustableAction { direction in
+            let step = Constants.Music.seekStepSeconds
+            music.skip(by: direction == .increment ? step : -step)
+        }
+    }
+
+    private func timeLabel(_ seconds: Double) -> some View {
+        Text(TimeRemaining(from: seconds).clockFormat)
+            .font(.caption2.monospacedDigit())
+            .foregroundColor(.secondary)
+            .frame(minWidth: 30)
+    }
+
+    private func skipButton(_ symbol: String, label: String, by seconds: Double) -> some View {
+        Button(action: { music.skip(by: seconds) }) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 24, height: 20)
+        }
+        .buttonStyle(CustomPlainButtonStyle())
+        .cornerRadius(5)
+        .accessibilityLabel(label)
     }
 }
 
