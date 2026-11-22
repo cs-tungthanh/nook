@@ -282,7 +282,14 @@ final class Pomodoro: ObservableObject {
     @Published var intervalMinutes: Int {
         didSet {
             defaults.set(intervalMinutes, forKey: Constants.Pomodoro.Keys.intervalMinutes)
-            if case .focusing = phase { startCycle() }
+            // Keep the time already focused: 15 min into 20, changing to 25 leaves 10
+            let change = TimeInterval((intervalMinutes - oldValue) * Constants.Time.secondsPerMinute)
+            if case .focusing(let endsAt, let duration) = phase {
+                phase = .focusing(endsAt: endsAt.addingTimeInterval(change), duration: duration + change)
+            } else if let held = heldPhase, !held.isBreak {
+                heldPhase = HeldPhase(isBreak: false, remaining: max(0, held.remaining + change),
+                                      duration: held.duration + change, pausedAt: held.pausedAt)
+            }
         }
     }
 
@@ -301,6 +308,15 @@ final class Pomodoro: ObservableObject {
     private let overlay = BreakOverlayController()
     private var tickTimer: Timer?
     private var pauseReasons: Set<String> = []
+    /// The focus or break a pause interrupted, so resuming picks it up where it stopped
+    private var heldPhase: HeldPhase?
+
+    private struct HeldPhase {
+        let isBreak: Bool
+        let remaining: TimeInterval
+        let duration: TimeInterval
+        let pausedAt: Date
+    }
     private var observers: [NSObjectProtocol] = []
 
     init() {
@@ -353,15 +369,23 @@ final class Pomodoro: ObservableObject {
         startCycle()
     }
 
-    func snooze() {
-        overlay.hide()
+    /// Pushes the coming break back by the snooze time, keeping the focus so far
+    func postponeBreak() {
+        guard case .focusing(let endsAt, let duration) = phase else { return }
         let snoozeInterval = TimeInterval(Constants.Pomodoro.snoozeMinutes * Constants.Time.secondsPerMinute)
+        phase = .focusing(endsAt: endsAt.addingTimeInterval(snoozeInterval), duration: duration + snoozeInterval)
+    }
+
+    func snooze() {
+        let snoozeInterval = TimeInterval(Constants.Pomodoro.snoozeMinutes * Constants.Time.secondsPerMinute)
+        overlay.hide()
         phase = .focusing(endsAt: Date().addingTimeInterval(snoozeInterval), duration: snoozeInterval)
     }
 
     // MARK: Cycle
 
     private func startCycle() {
+        heldPhase = nil
         guard isEnabled else { return }
         startTicking()
         guard pauseReasons.isEmpty else {
@@ -451,6 +475,16 @@ final class Pomodoro: ObservableObject {
     private func pause(_ reason: String) {
         pauseReasons.insert(reason)
         guard isEnabled else { return }
+        switch phase {
+        case .focusing(let endsAt, let duration):
+            heldPhase = HeldPhase(isBreak: false, remaining: max(0, endsAt.timeIntervalSinceNow),
+                                  duration: duration, pausedAt: Date())
+        case .onBreak(let endsAt, let duration):
+            heldPhase = HeldPhase(isBreak: true, remaining: max(0, endsAt.timeIntervalSinceNow),
+                                  duration: duration, pausedAt: Date())
+        case .off, .paused:
+            break
+        }
         overlay.hide()
         phase = .paused
     }
@@ -458,7 +492,23 @@ final class Pomodoro: ObservableObject {
     private func resume(_ reason: String) {
         pauseReasons.remove(reason)
         guard isEnabled, pauseReasons.isEmpty, phase == .paused else { return }
-        startCycle()
+        guard let held = heldPhase else {
+            startCycle()
+            return
+        }
+        heldPhase = nil
+        let endsAt = Date().addingTimeInterval(held.remaining)
+        if held.isBreak {
+            // Time away from the Mac counts as rest: a break the pause outlasted is done
+            guard Date().timeIntervalSince(held.pausedAt) < held.remaining else {
+                startCycle()
+                return
+            }
+            phase = .onBreak(endsAt: endsAt, duration: held.duration)
+            if mode == .overlay { overlay.show(pomodoro: self) }
+        } else {
+            phase = .focusing(endsAt: endsAt, duration: held.duration)
+        }
     }
 }
 
@@ -1520,7 +1570,12 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var connectNotification: IOBluetoothUserNotification?
     private var disconnectNotifications: [String: IOBluetoothUserNotification] = [:]
     private var isRefreshScheduled = false
-    private var refreshGeneration = 0
+    private var refreshGeneration = 0 {
+        didSet { latestGeneration.set(refreshGeneration) }
+    }
+    /// `refreshGeneration` readable off the main thread, so a queued refresh
+    /// that a newer one superseded can skip the slow report entirely.
+    private let latestGeneration = LockedValue(0)
     private let reportQueue = DispatchQueue(label: "com.nook.bluetooth.report", qos: .userInitiated)
 
     /// Refreshes on the next main-loop turn, collapsing bursts into one. Callbacks
@@ -1557,7 +1612,10 @@ final class BluetoothManager: NSObject, ObservableObject {
             let generation = refreshGeneration
             // Each IOBluetooth property read is a round trip to bluetoothd; doing
             // them on the main thread held up the island every time it opened
-            reportQueue.async { [weak self] in
+            reportQueue.async { [weak self, latestGeneration] in
+                // Opening and closing the island quickly queues several refreshes;
+                // only the newest one is worth a system_profiler run
+                guard generation == latestGeneration.get() else { return }
                 let paired = ((IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []).map(Self.info)
                 let report = SystemBluetoothReport.load()
                 let devices = Self.merge(paired, with: report).sorted {
@@ -1737,6 +1795,24 @@ final class BluetoothManager: NSObject, ObservableObject {
     }
 }
 
+/// A value shared between threads, guarded by a lock.
+final class LockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) { self.value = value }
+
+    func get() -> Value {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: Value) {
+        lock.lock(); defer { lock.unlock() }
+        value = newValue
+    }
+}
+
 /// The Bluetooth section of `system_profiler`: the same device list and battery
 /// levels System Settings shows. Takes well under a second, so it runs on each refresh.
 private enum SystemBluetoothReport {
@@ -1758,6 +1834,10 @@ private enum SystemBluetoothReport {
         } catch {
             NSLog("Nook: couldn't run system_profiler: \(error.localizedDescription)")
             return [:]
+        }
+        // A hung system_profiler must not hold up every later refresh
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+            if process.isRunning { process.terminate() }
         }
         // Read before waiting so a full pipe can't block the process
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -1867,6 +1947,12 @@ final class SystemMonitor: ObservableObject {
         } else {
             timer?.invalidate()
             timer = nil
+            // Rates are measured between samples; the next open must not
+            // average over the whole time the page was closed
+            queue.async { [weak self] in
+                self?.lastCPUTicks = nil
+                self?.lastNetwork = nil
+            }
         }
     }
 
@@ -2162,6 +2248,7 @@ enum MusicError: LocalizedError {
     case network
     case signIn
     case emptyPlaylist
+    case keychain(OSStatus)
 
     var errorDescription: String? {
         switch self {
@@ -2172,6 +2259,9 @@ enum MusicError: LocalizedError {
         case .network: return "Can't reach YouTube"
         case .signIn: return "Connect your YouTube account again"
         case .emptyPlaylist: return "This playlist has no videos"
+        case .keychain(let status):
+            let reason = SecCopyErrorMessageString(status, nil) as String? ?? "error \(status)"
+            return "Couldn't save the sign-in to the keychain: \(reason)"
         case .player(let code):
             switch code {
             case 100: return "This video is private or was removed"
@@ -2387,6 +2477,8 @@ final class YouTubeAccount: NSObject, ObservableObject {
 
     private var accessToken: String?
     private var accessTokenExpiry = Date.distantPast
+    /// The token refresh under way, shared so parallel requests don't each start one
+    private var tokenRefresh: Task<String, Error>?
     private var authSession: ASWebAuthenticationSession?
     private var lastRefresh = Date.distantPast
 
@@ -2484,7 +2576,7 @@ final class YouTubeAccount: NSObject, ObservableObject {
             "redirect_uri": redirect
         ])
         guard let refreshToken = json["refresh_token"] as? String else { throw MusicError.signIn }
-        Keychain.write(refreshToken, for: Keys.refreshToken)
+        try Keychain.write(refreshToken, for: Keys.refreshToken)
         store(json)
         isSignedIn = true
     }
@@ -2493,23 +2585,29 @@ final class YouTubeAccount: NSObject, ObservableObject {
     @MainActor
     private func validAccessToken() async throws -> String {
         if let token = accessToken, accessTokenExpiry.timeIntervalSinceNow > 60 { return token }
+        if let refresh = tokenRefresh { return try await refresh.value }
         guard let clientID = clientID, let refreshToken = Keychain.read(Keys.refreshToken) else {
             throw MusicError.signIn
         }
-        do {
-            let json = try await Self.postToken([
-                "client_id": clientID,
-                "refresh_token": refreshToken,
-                "grant_type": "refresh_token"
-            ])
-            store(json)
-        } catch MusicError.signIn {
-            // The grant was revoked or expired: sign out so the menu offers to connect again
-            signOut()
-            throw MusicError.signIn
+        let refresh = Task { @MainActor () throws -> String in
+            defer { tokenRefresh = nil }
+            do {
+                let json = try await Self.postToken([
+                    "client_id": clientID,
+                    "refresh_token": refreshToken,
+                    "grant_type": "refresh_token"
+                ])
+                store(json)
+            } catch MusicError.signIn {
+                // The grant was revoked or expired: sign out so the menu offers to connect again
+                signOut()
+                throw MusicError.signIn
+            }
+            guard let token = accessToken else { throw MusicError.signIn }
+            return token
         }
-        guard let token = accessToken else { throw MusicError.signIn }
-        return token
+        tokenRefresh = refresh
+        return try await refresh.value
     }
 
     private func store(_ json: [String: Any]) {
@@ -2661,7 +2759,7 @@ private enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
-    static func write(_ value: String, for account: String) {
+    static func write(_ value: String, for account: String) throws {
         delete(account)
         let item: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -2669,7 +2767,8 @@ private enum Keychain {
             kSecAttrAccount as String: account,
             kSecValueData as String: Data(value.utf8)
         ]
-        SecItemAdd(item as CFDictionary, nil)
+        let status = SecItemAdd(item as CFDictionary, nil)
+        guard status == errSecSuccess else { throw MusicError.keychain(status) }
     }
 
     static func delete(_ account: String) {
@@ -2714,7 +2813,7 @@ final class MusicPlayer: NSObject, ObservableObject {
     @Published var volume: Double {
         didSet {
             defaults.set(volume, forKey: Constants.Music.Keys.volume)
-            run("nook.setVolume(\(Int(volume)))", onlyIfReady: true)
+            run("nook.setVolume(\(Int(volume)))")
         }
     }
 
@@ -2755,10 +2854,25 @@ final class MusicPlayer: NSObject, ObservableObject {
     private var webView: WKWebView?
     private var isPlayerReady = false
     /// A command sent before the player finished loading
-    private var pendingCommand: String?
+    /// The `nook.load` item waiting for the player to finish loading
+    private var pendingItem: String?
+    /// The station last handed to the player; differs from `station` when a
+    /// pause cancelled the load before it got there
+    private var loadedStation: MusicStation?
+    /// Set when a cached live stream failed and is being searched for again,
+    /// so a fresh stream that also fails falls back instead of looping
+    private var isRetryingLiveSearch = false
     private var loadTask: Task<Void, Never>?
     /// What played before the current station; it comes back if the new one can't play
-    private var fallback: MusicStation?
+    private var fallback: Fallback?
+
+    private struct Fallback {
+        let station: MusicStation
+        let status: Status
+        let title: String?
+        let channel: String?
+        let videoID: String?
+    }
     /// Live stream IDs found for presets this session
     private var liveStreams: [String: String] = [:]
     private var noticeWork: DispatchWorkItem?
@@ -2775,8 +2889,14 @@ final class MusicPlayer: NSObject, ObservableObject {
     // MARK: Actions
 
     func play(_ newStation: MusicStation) {
-        if station != newStation, status == .playing || status == .paused {
-            fallback = station
+        play(newStation, resuming: false)
+    }
+
+    /// With `resuming`, the player picks up where it was before the last
+    /// switch: same playlist entry, same moment
+    private func play(_ newStation: MusicStation, resuming: Bool) {
+        if let station = station, station != newStation, status == .playing || status == .paused {
+            fallback = Fallback(station: station, status: status, title: title, channel: channel, videoID: videoID)
         }
         station = newStation
         title = nil
@@ -2791,7 +2911,7 @@ final class MusicPlayer: NSObject, ObservableObject {
             do {
                 let item = try await self.playerItem(for: newStation)
                 guard !Task.isCancelled, self.station == newStation else { return }
-                self.run("nook.load(\(item))")
+                self.load(item, resuming: resuming)
             } catch {
                 guard !Task.isCancelled, self.station == newStation else { return }
                 self.couldNotPlay(error)
@@ -2803,16 +2923,24 @@ final class MusicPlayer: NSObject, ObservableObject {
         switch status {
         case .playing, .loading:
             loadTask?.cancel()
-            run("nook.pause()", onlyIfReady: true)
+            run("nook.pause()")
             status = .paused
         case .paused:
-            run("nook.play()", onlyIfReady: true)
+            if let station = station, loadedStation != station {
+                // Paused before the station reached the player: load it now
+                play(station)
+            } else if isPlayerReady {
+                run("nook.play()")
+            } else {
+                // The waiting load starts playing once the player is ready
+                status = .loading
+            }
         case .idle, .failed:
             if let station = station { play(station) }
         }
     }
 
-    func next() { run("nook.next()", onlyIfReady: true) }
+    func next() { run("nook.next()") }
 
     /// Opens the video playing now on youtube.com in the default browser, at
     /// the same moment, and pauses Nook so the two don't play over each other
@@ -2836,7 +2964,7 @@ final class MusicPlayer: NSObject, ObservableObject {
             open(Int((result as? Double) ?? 0))
         }
     }
-    func previous() { run("nook.previous()", onlyIfReady: true) }
+    func previous() { run("nook.previous()") }
 
     /// Saves the station playing from search, so it stays in the station list
     func saveCurrentStation() {
@@ -2878,35 +3006,82 @@ final class MusicPlayer: NSObject, ObservableObject {
 
     // MARK: Player
 
-    /// The JS object `nook.load` takes: a video or a playlist to start
+    /// The JS object `nook.load` takes: a video or a playlist to start.
+    /// Built as JSON so no ID can break out of the JavaScript it's put in.
     private func playerItem(for station: MusicStation) async throws -> String {
         switch station.source {
         case .video(let id):
-            return "{videoId: '\(id)'}"
+            return try Self.jsObject(["videoId": id])
         case .playlist(let id):
-            return "{list: '\(id)'}"
+            return try Self.jsObject(["list": id])
         case .accountPlaylist(let id):
             guard let account = account else { throw MusicError.signIn }
             let ids = try await account.videoIDs(in: id)
             guard !ids.isEmpty else { throw MusicError.emptyPlaylist }
-            let list = String(data: try JSONSerialization.data(withJSONObject: ids), encoding: .utf8) ?? "[]"
-            return "{videos: \(list)}"
+            return try Self.jsObject(["videos": ids])
         case .liveSearch(let query):
-            if let id = liveStreams[query] { return "{videoId: '\(id)'}" }
+            if let id = liveStreams[query] { return try Self.jsObject(["videoId": id]) }
             guard let stream = try await YouTube.search(query, filter: .live).first(where: { $0.kind == .live }) else {
                 throw MusicError.noLiveStream
             }
             await MainActor.run { liveStreams[query] = stream.id }
-            return "{videoId: '\(stream.id)'}"
+            return try Self.jsObject(["videoId": stream.id])
         }
     }
 
+    private static func jsObject(_ object: [String: Any]) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
+
+    /// Hands `item` to the player, loading the player first if needed
+    private func load(_ item: String, resuming: Bool = false) {
+        loadedStation = station
+        guard isPlayerReady, webView != nil else {
+            pendingItem = item
+            loadPlayer()
+            return
+        }
+        run("nook.load(\(item), true, \(resuming))")
+    }
+
+    /// Forgets the live stream found for the current station, so the next
+    /// play searches again instead of loading a stream that has ended
+    @discardableResult
+    private func forgetLiveStream() -> Bool {
+        guard case .liveSearch(let query)? = station?.source else { return false }
+        return liveStreams.removeValue(forKey: query) != nil
+    }
+
     private func couldNotPlay(_ error: Error) {
+        // A cached live stream may simply have ended: search once more
+        if forgetLiveStream(), !isRetryingLiveSearch, let station = station {
+            isRetryingLiveSearch = true
+            play(station)
+            return
+        }
+        isRetryingLiveSearch = false
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        if let fallback = fallback, fallback != station {
+        if let fallback = fallback, fallback.station != station {
             let failedName = station?.name ?? "This station"
             self.fallback = nil
-            play(fallback)
+            if loadedStation == fallback.station {
+                // The new station never reached the player, so the old one is
+                // still playing: just show it again
+                loadTask?.cancel()
+                station = fallback.station
+                status = fallback.status
+                title = fallback.title
+                channel = fallback.channel
+                videoID = fallback.videoID
+                save(fallback.station, forKey: Constants.Music.Keys.lastStation)
+            } else {
+                // A live stream has no earlier moment to go back to
+                let isLive: Bool = {
+                    if case .liveSearch = fallback.station.source { return true }
+                    return false
+                }()
+                play(fallback.station, resuming: !isLive)
+            }
             show(notice: "Couldn't play “\(failedName)”: \(message)")
         } else {
             status = .failed(message)
@@ -2921,15 +3096,10 @@ final class MusicPlayer: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
     }
 
-    /// Runs JS in the player, loading the player first if needed. With
-    /// `onlyIfReady`, commands are dropped while there's no player to obey them.
-    private func run(_ command: String, onlyIfReady: Bool = false) {
-        guard isPlayerReady, let webView = webView else {
-            guard !onlyIfReady else { return }
-            pendingCommand = command
-            loadPlayer()
-            return
-        }
+    /// Runs JS in the player. Commands are dropped while there's no player
+    /// to obey them; `load` is what starts the player.
+    private func run(_ command: String) {
+        guard isPlayerReady, let webView = webView else { return }
         webView.evaluateJavaScript(command) { _, error in
             if let error = error {
                 NSLog("Nook: music command failed: \(error.localizedDescription)")
@@ -2941,7 +3111,9 @@ final class MusicPlayer: NSObject, ObservableObject {
         guard webView == nil else { return }
         let config = WKWebViewConfiguration()
         config.mediaTypesRequiringUserActionForPlayback = []
-        config.userContentController.add(self, name: "nook")
+        // Through a weak proxy: the content controller retains its handlers,
+        // and the player owns the web view, so adding `self` is a retain cycle
+        config.userContentController.add(WeakScriptMessageHandler(self), name: "nook")
 
         let size = Constants.Music.playerSize
         let webView = WKWebView(frame: NSRect(origin: .zero, size: size), configuration: config)
@@ -2962,7 +3134,7 @@ final class MusicPlayer: NSObject, ObservableObject {
         <script src="https://www.youtube.com/iframe_api"></script>
         <script>
         const post = message => window.webkit.messageHandlers.nook.postMessage(message);
-        let player, fadeTimer, volume = \(Int(volume));
+        let player, fadeTimer, pendingStart, resumePoint, volume = \(Int(volume));
 
         function onYouTubeIframeAPIReady() {
           player = new YT.Player('player', {
@@ -2976,33 +3148,57 @@ final class MusicPlayer: NSObject, ObservableObject {
           });
         }
 
-        function fade(to, ms, done) {
+        // Fades the old station out, then starts the new one. Pausing or a
+        // new load mid-fade still starts it, so the switch is never lost.
+        function fadeOutThen(start) {
           clearInterval(fadeTimer);
+          pendingStart = start;
           const from = player.getVolume(), steps = 10;
           let step = 0;
           fadeTimer = setInterval(() => {
             step++;
-            player.setVolume(Math.round(from + (to - from) * step / steps));
-            if (step >= steps) { clearInterval(fadeTimer); done(); }
-          }, ms / steps);
+            player.setVolume(Math.round(from * (1 - step / steps)));
+            if (step >= steps) { finishFade(true); }
+          }, \(Constants.Music.fadeMilliseconds) / steps);
+        }
+
+        function finishFade(autoplay) {
+          clearInterval(fadeTimer);
+          const start = pendingStart;
+          pendingStart = null;
+          if (start) { start(autoplay); }
         }
 
         window.nook = {
-          load(item) {
-            const start = () => {
-              if (item.videos) { player.loadPlaylist(item.videos); }
-              else if (item.list) { player.loadPlaylist({ list: item.list, listType: 'playlist' }); }
-              else { player.loadVideoById(item.videoId); }
+          load(item, autoplay, resume) {
+            // Where the outgoing station was, so a failed switch can return to it
+            const here = { index: Math.max(0, player.getPlaylistIndex()), time: player.getCurrentTime() || 0 };
+            const at = resume && resumePoint ? resumePoint : { index: 0, time: 0 };
+            resumePoint = resume ? null : here;
+            const start = play => {
+              if (play) {
+                if (item.videos) { player.loadPlaylist(item.videos, at.index, at.time); }
+                else if (item.list) { player.loadPlaylist({ list: item.list, listType: 'playlist', index: at.index, startSeconds: at.time }); }
+                else { player.loadVideoById(item.videoId, at.time); }
+              } else {
+                if (item.videos) { player.cuePlaylist(item.videos); }
+                else if (item.list) { player.cuePlaylist({ list: item.list, listType: 'playlist' }); }
+                else { player.cueVideoById(item.videoId); }
+              }
               player.setVolume(volume);
             };
-            if (player.getPlayerState() === YT.PlayerState.PLAYING) { fade(0, \(Constants.Music.fadeMilliseconds), start); }
-            else { start(); }
+            if (autoplay && player.getPlayerState() === YT.PlayerState.PLAYING) { fadeOutThen(start); }
+            else { pendingStart = null; clearInterval(fadeTimer); start(autoplay); }
           },
           play() { player.playVideo(); },
-          pause() { clearInterval(fadeTimer); player.pauseVideo(); },
+          pause() {
+            if (pendingStart) { finishFade(false); }
+            else { player.pauseVideo(); }
+          },
           next() { player.nextVideo(); },
           previous() { player.previousVideo(); },
-          setVolume(value) { volume = value; clearInterval(fadeTimer); player.setVolume(value); }
+          // During a fade only remember the volume; the new station starts at it
+          setVolume(value) { volume = value; if (!pendingStart) { player.setVolume(value); } }
         };
         </script></body></html>
         """
@@ -3012,9 +3208,10 @@ final class MusicPlayer: NSObject, ObservableObject {
         switch event["event"] as? String {
         case "ready":
             isPlayerReady = true
-            if let command = pendingCommand {
-                pendingCommand = nil
-                run(command)
+            if let item = pendingItem {
+                pendingItem = nil
+                // Paused while the player loaded: cue the station without playing it
+                run("nook.load(\(item), \(status != .paused))")
             }
         case "state":
             if let newTitle = event["title"] as? String, !newTitle.isEmpty {
@@ -3031,8 +3228,11 @@ final class MusicPlayer: NSObject, ObservableObject {
             case 1:
                 status = .playing
                 fallback = nil
+                isRetryingLiveSearch = false
                 if let station = station { remember(station) }
             case 0, 2, 5:
+                // An ended live stream is gone for good
+                if event["state"] as? Int == 0 { forgetLiveStream() }
                 if status != .loading || event["state"] as? Int == 0 { status = .paused }
             case 3, -1:
                 if status != .paused { status = .loading }
@@ -3057,6 +3257,17 @@ final class MusicPlayer: NSObject, ObservableObject {
     private static func load<Value: Decodable>(_ type: Value.Type, forKey key: String) -> Value? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
+    }
+}
+
+/// Forwards script messages without keeping the real handler alive.
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    private weak var target: WKScriptMessageHandler?
+
+    init(_ target: WKScriptMessageHandler) { self.target = target }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(controller, didReceive: message)
     }
 }
 
@@ -3547,6 +3758,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         stopEscapeMonitor()
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
+            // A full-screen break that started while the island was open owns
+            // its keys: Esc there means "back to focus", not "close the island"
+            if event.window is BreakOverlayWindow { return event }
             // The music search takes Esc (back to the tiles), arrows and Return
             if self.musicSearch.isPresented {
                 return self.musicSearch.handle(event) ? nil : event
@@ -3653,13 +3867,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         end tell
         """
 
-        if let appleScript = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            appleScript.executeAndReturnError(&error)
+        var error: NSDictionary?
+        NSAppleScript(source: script)?.executeAndReturnError(&error)
 
-            if let error = error {
-                print("Error executing shutdown: \(error)")
-            }
+        // The schedule is spent either way. If the Mac is still running (an
+        // app refused to quit, or Automation permission was denied), the
+        // countdown and menu bar icon must not linger past their time.
+        timer?.invalidate()
+        timer = nil
+        shutdownDate = nil
+        updateStatusItem()
+
+        if let error = error {
+            let message = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
+            NSLog("Nook: shutdown failed: \(message)")
+            showNotification(
+                title: "Couldn't Shut Down",
+                body: "\(message) Check that Nook may control System Events in System Settings › Privacy & Security › Automation."
+            )
         }
     }
 
@@ -3992,7 +4217,10 @@ struct ContentView: View {
 
             switch pomodoro.phase {
             case .focusing:
-                pomodoroPill("Break now", systemImage: "cup.and.saucer.fill", theme: theme, prominent: true, action: pomodoro.startBreak)
+                HStack(spacing: 8) {
+                    pomodoroPill("Snooze \(Constants.Pomodoro.snoozeMinutes)m", systemImage: "moon.zzz.fill", theme: theme, prominent: false, action: pomodoro.postponeBreak)
+                    pomodoroPill("Break now", systemImage: "cup.and.saucer.fill", theme: theme, prominent: true, action: pomodoro.startBreak)
+                }
             case .onBreak:
                 HStack(spacing: 8) {
                     pomodoroPill("Snooze \(Constants.Pomodoro.snoozeMinutes)m", systemImage: "moon.zzz.fill", theme: theme, prominent: false, action: pomodoro.snooze)
