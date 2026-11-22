@@ -1,132 +1,160 @@
-<p align="center"><img src="icon/preview.png" width="128" alt="Nook icon"></p>
+<p align="center"><img src="icon/preview.png" width="112" alt="Nook icon"></p>
 
-# Nook
+<h1 align="center">Nook</h1>
 
-**Your little corner of utilities.**
-
-Nook is a lightweight macOS app that brings everyday utilities together in one convenient place. From Pomodoro focus sessions to scheduling shutdowns and cleaning up your system, Nook helps you take care of small tasks without interrupting your workflow.
-
-## ✨ Features
-
-Nook lives in your menu bar. Click its icon and Nook drops down from the notch at the top center of the screen, like the Dynamic Island. Click the icon again, click anywhere else or press Esc to fold it back up.
-
-The island has two pages. **Utilities** shows five tiles in two columns: Pomodoro and Power Off on the left, Music, Screen Recording and Bluetooth on the right. **System** shows your Mac's vitals. Switch between them with the button in the island's header, next to **Quit**.
+<p align="center"><strong>Your little corner of utilities, right under the notch.</strong></p>
 
 <p align="center">
-  <img src="screenshots/utilities.png" width="700" alt="The Utilities page: Pomodoro, Power Off, Screen Recording and Bluetooth tiles">
+  <a href="https://github.com/cs-tungthanh/nook/releases/latest"><img src="https://img.shields.io/github/v/release/cs-tungthanh/nook?style=flat-square&label=release&color=e8613c" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/macOS-13%2B-1f2328?style=flat-square&logo=apple&logoColor=white" alt="macOS 13 or later">
+  <img src="https://img.shields.io/badge/Apple_silicon-arm64-1f2328?style=flat-square" alt="Apple silicon">
+  <a href="https://cs-tungthanh.github.io/projects/nook/"><img src="https://img.shields.io/badge/website-nook-2f7cf6?style=flat-square" alt="Website"></a>
+</p>
+
+Nook lives in your menu bar. Click its icon and a panel drops down from the notch, like the Dynamic Island, with a Pomodoro timer, a shutdown timer, background music, screen recording, your Bluetooth devices and your Mac's vitals. Click away or press Esc and it folds back up.
+
+<p align="center">
+  <img src="screenshots/utilities.png" width="720" alt="Nook's Utilities page: Pomodoro, Power Off, Music, Screen Recording and Bluetooth tiles">
+</p>
+
+## Install
+
+```bash
+brew install --cask cs-tungthanh/tap/nook
+```
+
+Nook updates itself: when a new version is out, the island shows **Update to x.y.z**, and **About › Update & Relaunch** installs it. You can also run `brew upgrade --cask cs-tungthanh/tap/nook`, and remove Nook with `brew uninstall --cask cs-tungthanh/tap/nook`.
+
+> [!NOTE]
+> Use the full name `cs-tungthanh/tap/nook`. A plain `brew install nook` installs a different app, a web browser that's also called Nook.
+
+Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs macOS 15. It isn't notarized by Apple, so the Homebrew cask clears the download's quarantine flag for you. To build it yourself instead, see [Build from source](#build-from-source).
+
+## What's inside
+
+| | |
+|---|---|
+| ⏱️ **Pomodoro** | Focus sprints with a live countdown ring, then a break as a notification or a full-screen overlay. Pauses while your Mac is locked or asleep. |
+| ⏻ **Power Off** | Drag along a ruler to shut your Mac down in 5 minutes to 2 hours. Cancel in one click. |
+| 🎵 **Music** | Study, sleep, focus and jazz live streams from YouTube, playing in the background. Search YouTube or play your own playlists. |
+| ⏺️ **Screen Recording** | One screen, all screens or an area, with system audio and your microphone. Pause, resume and save as `.mov`. |
+| 📶 **Bluetooth** | Your paired devices with battery levels, including AirPods left, right and case. Connect or disconnect in one click. |
+| 📊 **System** | CPU, GPU, memory, battery, network, disk space and power draw at a glance. |
+| ℹ️ **About & updates** | Your version, how Nook was installed, and one-click updates from GitHub. |
+
+<p align="center">
+  <img src="screenshots/system.png" width="720" alt="Nook's System page: CPU, GPU, Memory, Battery, Network, Available disk space and Power tiles">
 </p>
 
 <p align="center">
-  <img src="screenshots/system.png" width="700" alt="The System page: CPU, GPU, Memory, Battery, Network, Available disk space and Power tiles">
+  <img src="screenshots/about.png" width="720" alt="Nook's About page: version 1.1.0, installed with Homebrew, up to date">
 </p>
 
-- **Power-off Timer** — Schedule your Mac to shut down after a set time.
-  - Click or drag along the ruler to pick 5 minutes to 2 hours in 5-minute steps, then press Start.
-  - A live countdown in the island, and a power icon in the menu bar while a shutdown is scheduled.
-  - Cancel with one click. You get a notification when a shutdown is scheduled or cancelled.
-- **Pomodoro** — Focus in sprints and take regular breaks away from your screen.
-  - A colorful card in the island: press **Start focusing**, then watch a live countdown ring — tomato red while you focus, mint green on a break, grey while paused.
-  - Focus for N minutes (20 by default), then break for 2m, 5m, 10m or 20m. **Break now** starts a break early; **Back to focus** ends one.
-  - Two break styles: a **Notification** with Start break / Snooze / Skip actions, or a **Full screen** blurred overlay with a countdown (press Esc to get back to focus; the screen is never locked).
-  - A ☕ icon in the menu bar during a break.
-  - Pauses while your Mac is locked or asleep. Settings are remembered between launches.
-- **Screen Recording** — Record your screens with audio (macOS 15 or later).
-  - **Source**: one **Screen** (pick which when you have several), **All screens** side by side in one video, or an **Area** you drag out after pressing Record (Esc cancels).
-  - Include **System** audio (what your Mac plays), your **Microphone**, or both. Your choices are remembered.
-  - **Stop** pauses the recording. Then **Resume** to keep recording into the same video, **Save** to finish it, or **Discard** to delete it.
-  - **Save** opens a dialog to name the `.mov` and pick a folder (Desktop by default), then shows it in Finder. Cancelling asks before deleting the recording. Quitting Nook with an unsaved recording asks where to save it first.
-  - While recording, a red **Stop** button with the elapsed time appears in the menu bar; click it to stop, and the island opens so you can resume or save.
-  - A record icon in the menu bar while recording (a pause icon while stopped) and a running timer in the island; Nook's own island is left out of the video.
-  - Very wide videos (for example two Retina screens) are saved as HEVC and scaled down to what the encoder supports.
-  - The first time, macOS asks you to allow Nook under **Screen & System Audio Recording** (and **Microphone** if you include it).
-- **Bluetooth** — Your paired devices, one tap from connecting.
-  - Each device shows whether it's connected and its battery level, including left, right and case for AirPods.
-  - **Connect** or **Disconnect** with one click. The first four devices are shown; **Show all** lists the rest.
-  - To forget a device, use **System Settings › Bluetooth**. macOS doesn't let other apps unpair devices.
-  - The first time, macOS asks you to allow Nook under **Bluetooth**.
-- **Music** — Study, sleep and focus music from YouTube, playing in the background.
-  - Pick a station from the menu in the Music tile: **Study**, **Sleep**, **Focus** or **Jazz**. Each plays a current live stream, so it never goes stale.
-  - Press 🔍 to search YouTube without leaving Nook. Filter by **Live**, **Playlists** or **Long (1h+)**, use ↑↓ to choose and press Return to play it now, or ⌘Return to also save it as a station. Esc goes back to the tiles. Your last 10 searches are listed until you type; **Clear** removes them.
-  - A result you play from search isn't saved until you press **☆ Save**. You can also **Add from YouTube Link…** (a link on the clipboard is filled in), and remove saved stations from the same menu.
-  - Switching stations fades the old music out. If something can't be played outside YouTube, Nook says so and the previous station keeps playing.
-  - Music keeps playing while the island is closed, with a ♪ icon in the menu bar. Right-click the menu bar icon to play, pause or switch stations without opening the island.
-  - Nothing plays until you press play; your last station and volume are remembered. Videos play through YouTube's own player, so YouTube's ads may play too.
-  - Once a station like **Study** is playing, the tile shows the stream's own title, with the station and channel underneath (for example *Study · Lofi Girl*).
-  - Press ↗ (or **Open in YouTube** in the menu) to open what's playing on youtube.com in your browser, at the same moment. Nook pauses so the two don't play over each other.
-  - **Recently Played** in the station menu lists the last 15 stations that played, whether presets, search results or playlists. **Clear Recently Played** empties it.
-  - **Connect YouTube Account** adds **Your Playlists** to the menu: your Liked videos and your own playlists, private ones included. Sign-in happens in your browser, Nook only reads your account, and **Disconnect** signs it out again. It needs a Google client ID when building; see [Connect YouTube](#connect-youtube).
-- **System** — Press **System** in the island's header to see your Mac's vitals at a glance; press **Utilities** to go back.
-  - **CPU**, **GPU** and **Memory** usage, each with a meter that turns orange above 85%.
-  - **Battery** level and whether it's charging, and **Network** download and upload speed.
-  - **Available** disk space, and **Power**: how many watts your Mac draws, with the adapter's rating when plugged in.
-  - Updates every 1.5 seconds, and only while the page is open.
-- **Cleanup** — Command-line tools that keep your system tidy (not in the menu bar app yet):
-  - `clean-zsh` removes duplicate commands from `~/.zsh_history`, keeping the latest of each.
-  - The bookmark updater follows redirects in your Microsoft Edge bookmarks and rewrites links that have moved.
-- **More Utilities** — A growing collection of handy tools for everyday tasks.
+## Features in detail
 
-> Features are planned to evolve as Nook grows.
+<details>
+<summary><strong>Pomodoro</strong></summary>
 
-## 🎯 Philosophy
+- A colorful card in the island: press **Start focusing**, then watch the countdown ring: tomato red while you focus, mint green on a break, grey while paused.
+- Focus for N minutes (20 by default), then break for 2, 5, 10 or 20 minutes. Changing the focus length keeps the time you've already focused.
+- **Break now** starts a break early, **Snooze 5m** pushes the next one back, and **Back to focus** ends a break.
+- Two break styles: a **Notification** with Start break, Snooze and Skip actions, or a **Full screen** blurred overlay with a countdown. Press Esc to get back to focus; the screen is never locked.
+- Pauses while your Mac is locked or asleep and picks up where it stopped. A ☕ icon shows in the menu bar during a break.
 
-Nook is built around a few simple principles:
+</details>
 
-- **Simple** — Do one thing well, without unnecessary complexity.
-- **Lightweight** — Stay out of your way and use resources responsibly.
-- **Convenient** — Keep useful tools within easy reach.
-- **Native** — Feel at home on macOS, with an interface that is clean and familiar.
-- **Extensible** — Make it easy to add new utilities as needs evolve.
+<details>
+<summary><strong>Power Off</strong></summary>
 
-## 🖥️ Platform
+- Click or drag along the ruler to pick 5 minutes to 2 hours in 5-minute steps, then press **Start**.
+- A live countdown in the island and a power icon in the menu bar while a shutdown is scheduled. Cancel with one click.
+- You get a notification when a shutdown is scheduled or cancelled, and if macOS refuses to shut down, Nook tells you why.
 
-- macOS
+</details>
 
-## 🚀 Getting Started
+<details>
+<summary><strong>Music</strong></summary>
 
-### Install with Homebrew
+- Pick a station: **Study**, **Sleep**, **Focus** or **Jazz**. Each plays a current live stream, so it never goes stale.
+- Press 🔍 to search YouTube. Filter by **Live**, **Playlists** or **Long (1h+)**, choose with ↑↓ and press Return to play, or ⌘Return to also save it as a station. Your last 10 searches stay listed.
+- Save search results with **☆ Save**, or **Add from YouTube Link…**. **Recently Played** lists the last 15 stations.
+- Switching stations fades the old music out. If something can't play outside YouTube, Nook says so and goes back to what was playing.
+- Music keeps playing with the island closed, with a ♪ icon in the menu bar. Right-click the menu bar icon to play, pause or switch stations.
+- Press ↗ to open what's playing on youtube.com at the same moment; Nook pauses so the two don't overlap.
+- **Connect YouTube Account** adds your Liked videos and playlists, private ones included. Sign-in happens in your browser, Nook only reads your account, and the sign-in is kept in your Keychain.
+- Videos play through YouTube's own player, so YouTube's ads may play too.
+
+</details>
+
+<details>
+<summary><strong>Screen Recording</strong></summary>
+
+- **Source**: one **Screen**, **All screens** side by side in one video, or an **Area** you drag out after pressing Record (Esc cancels).
+- Include **System** audio, your **Microphone**, or both.
+- **Stop** pauses the recording. Then **Resume**, **Save** to name the `.mov` and pick a folder, or **Discard**. Quitting with an unsaved recording asks where to save it first.
+- A red **Stop** button with the elapsed time sits in the menu bar while recording. Nook's own island is left out of the video.
+- Very wide videos, such as two Retina screens, are saved as HEVC and scaled to what the encoder supports.
+
+</details>
+
+<details>
+<summary><strong>Bluetooth</strong></summary>
+
+- Each device shows whether it's connected and its battery level, including left, right and case for AirPods.
+- **Connect** or **Disconnect** with one click. The first four devices are shown; **Show all** lists the rest.
+- To forget a device, use **System Settings › Bluetooth**; macOS doesn't let other apps unpair devices.
+
+</details>
+
+<details>
+<summary><strong>System</strong></summary>
+
+- **CPU**, **GPU** and **Memory** usage, each with a meter that turns orange above 85%.
+- **Battery** level and charging state, **Network** download and upload speed, **Available** disk space, and **Power**: the watts your Mac draws and the adapter's rating.
+- Updates every 1.5 seconds, and only while the page is open.
+
+</details>
+
+<details>
+<summary><strong>About & updates</strong></summary>
+
+- Click ⓘ in the island's header to see your version, whether Nook was installed with Homebrew, and links to GitHub and the release notes.
+- Nook checks GitHub for a new release shortly after launch and every 6 hours, and sends one notification per new version.
+- **Update & Relaunch** downloads the release, checks it against the SHA-256 that GitHub publishes, installs it (through Homebrew when Nook came from there) and reopens Nook. Each step is logged to `~/Library/Logs/Nook/update.log`.
+
+</details>
+
+### Permissions
+
+macOS asks for each of these the first time Nook needs it:
+
+| Permission | Why |
+|---|---|
+| **Notifications** | Break reminders, shutdown alerts and update notices |
+| **Automation** (System Events) | Shutting down your Mac at the scheduled time |
+| **Bluetooth** | Listing, connecting and disconnecting your devices |
+| **Screen & System Audio Recording**, **Microphone** | Only when you record your screen |
+
+## Build from source
+
+You need macOS 13 or later, the Swift compiler (Xcode or the Command Line Tools) and, for the command-line tools, Go.
 
 ```bash
-brew tap cs-tungthanh/tap
-brew trust cs-tungthanh/tap
-brew install nook
+./build.sh          # compile, bundle and sign Nook.app
+./install.sh        # build, replace /Applications/Nook.app and launch it
 ```
 
-`brew tap` adds the [cs-tungthanh/tap](https://github.com/cs-tungthanh/homebrew-tap) catalog, and `brew trust` lets Homebrew install from it (Homebrew asks this once for any tap outside its own). After that, update with `brew upgrade nook` and remove with `brew uninstall nook`. Nook needs an Apple silicon Mac.
+`./install.sh --uninstall` quits and removes Nook. Local builds take the latest release's version number, so the update check treats them as current.
 
-### Requirements for building
+`build.sh` signs with your Apple Development or Developer ID certificate when you have one, so macOS keeps Nook's permissions across rebuilds; otherwise it signs ad-hoc. Set `NOOK_SIGN_IDENTITY` to choose an identity, or `-` to force ad-hoc.
 
-- macOS 13 (Ventura) or later
-- Swift compiler (comes with Xcode or the Command Line Tools)
-- Go, for the command-line tools
+<details>
+<summary><strong>Connect YouTube: set up a Google client ID</strong></summary>
 
-### Build and run the app
-
-```bash
-./build.sh
-open Nook.app
-```
-
-To install it, or to update an installed copy, run:
-
-```bash
-./install.sh
-```
-
-It builds Nook, quits any running copy (an unsaved recording still gets its save prompt), replaces `/Applications/Nook.app` and launches it. `./install.sh --uninstall` quits and removes Nook.
-
-On first use, macOS asks for these permissions:
-
-- **Automation** — to shut down your Mac at the scheduled time.
-- **Notifications** — for shutdown alerts and break reminders.
-- **Bluetooth** — to list, connect and disconnect your devices.
-- **Screen & System Audio Recording** and **Microphone** — only when you record your screen.
-
-### Connect YouTube
-
-Listing your own playlists needs a Google OAuth client ID built into Nook. Without one, Nook works as usual but doesn't offer **Connect YouTube Account**. To set it up once:
+Listing your own playlists needs a Google OAuth client ID built into Nook. Without one, Nook works as usual but doesn't offer **Connect YouTube Account**.
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable **YouTube Data API v3**.
-2. Set up the OAuth consent screen (External, in testing) and add your Google account as a test user.
+2. Set up the OAuth consent screen (External), add the `youtube.readonly` scope, and add your Google account as a test user.
 3. Create an **OAuth client ID** of type **iOS** with bundle ID `com.nook.app`.
 4. Put it in a `.env` file next to `build.sh` (it's gitignored), then run `./install.sh`:
 
@@ -134,44 +162,52 @@ Listing your own playlists needs a Google OAuth client ID built into Nook. Witho
    NOOK_YOUTUBE_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
    ```
 
-`build.sh` also reads `NOOK_YOUTUBE_CLIENT_ID` from the environment. While the Google project is in testing, Google signs you out after 7 days and Nook offers to connect again. YouTube no longer gives apps your watch history, so **Recently Played** only covers what played in Nook.
+While the Google project is in testing, Google signs you out after 7 days and Nook offers to connect again. YouTube no longer gives apps your watch history, so **Recently Played** only covers what played in Nook.
 
-### Command-line tools
+</details>
+
+<details>
+<summary><strong>Command-line tools</strong></summary>
 
 ```bash
-# Remove duplicate commands from ~/.zsh_history (a backup is saved as .zsh_history.bak)
+# Remove duplicate commands from ~/.zsh_history, keeping the latest of each
+# (multi-line commands stay whole; a backup is saved as .zsh_history.bak)
 go run ./clean-zsh [path/to/history]
 
-# Preview which Edge bookmark URLs have moved, then save them with -apply
+# Preview which Microsoft Edge bookmarks have moved, then save them with -apply
 go run . [-apply] [-wait 3] [-bookmarks path] [-edge path] [-proxy url]
 ```
 
 Close Edge completely before running the bookmark updater with `-apply`, because Edge can overwrite its bookmarks file when it quits.
 
-The updater checks links in a fresh, signed-out Edge profile, so it doesn't use Edge's built-in VPN (Secure Network). If your network blocks a site, the check fails with `SKIP: page failed to load: ERR_CONNECTION_REFUSED`, even though the site opens in your normal Edge. Pass `-proxy` to send the check through a proxy or VPN, for example `-proxy socks5://127.0.0.1:1080`. Supported schemes are `http`, `https`, `socks4` and `socks5`, without a username or password.
+The updater checks links in a fresh, signed-out Edge profile, so it doesn't use Edge's built-in VPN. If your network blocks a site, pass `-proxy` to go through a proxy or VPN, for example `-proxy socks5://127.0.0.1:1080`. Supported schemes are `http`, `https`, `socks4` and `socks5`, without a username or password.
 
-### Releasing
+</details>
+
+<details>
+<summary><strong>Releasing</strong></summary>
 
 Push a version tag:
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+git tag -a v1.2.0 -m "Nook 1.2.0" && git push origin v1.2.0
 ```
 
-The [Release workflow](.github/workflows/release.yml) builds Nook with that version, attaches `Nook-1.0.0.zip` to a GitHub release, and updates `Casks/nook.rb` in [cs-tungthanh/homebrew-tap](https://github.com/cs-tungthanh/homebrew-tap) from the template in `packaging/homebrew/nook.rb`.
-
-It uses these repository secrets:
+The [Release workflow](.github/workflows/release.yml) builds Nook with that version, attaches `Nook-1.2.0.zip` to a GitHub release, and updates `Casks/nook.rb` in [cs-tungthanh/homebrew-tap](https://github.com/cs-tungthanh/homebrew-tap) from the template in `packaging/homebrew/nook.rb`. Installed copies of Nook then offer the update.
 
 | Secret | Required | What it is |
 |---|---|---|
 | `HOMEBREW_TAP_TOKEN` | Yes | A fine-grained token with **Contents: read and write** on `homebrew-tap` |
+| `NOOK_YOUTUBE_CLIENT_ID` | No | The Google OAuth client ID; without it, releases don't offer **Connect YouTube Account** |
 | `MACOS_CERT_P12` | No | Your signing certificate exported as `.p12`, base64-encoded |
 | `MACOS_CERT_PASSWORD` | No | The `.p12` export password |
-| `NOOK_YOUTUBE_CLIENT_ID` | No | The Google OAuth client ID from [Connect YouTube](#connect-youtube); without it, releases don't offer **Connect YouTube Account** |
 
-Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Screen Recording and Microphone permissions after every upgrade. Nook isn't notarized, so the cask clears the quarantine flag after install so Gatekeeper lets it open.
+Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Screen Recording and Microphone permissions after every upgrade.
 
-### Project layout
+</details>
+
+<details>
+<summary><strong>Project layout</strong></summary>
 
 | Path | What it is |
 |---|---|
@@ -186,28 +222,16 @@ Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Scree
 | `clean-zsh/` | Zsh history cleaner |
 | `main.go` | Edge bookmark updater |
 
-## 🛣️ Roadmap
+</details>
 
-- [x] Build the core app interface
-- [x] Implement the break timer
-- [x] Add scheduled power-off functionality
-- [ ] Bring the cleanup utilities into the app
-- [x] Add a menu bar interface for quick access
-- [x] Add screen recording and Bluetooth devices
-- [x] Show system status (CPU, GPU, memory, battery, network, disk, power)
-- [ ] Support configurable preferences
-- [ ] Expand the collection of utilities over time
+## Roadmap
 
-## 🤝 Contributing
+- [x] Pomodoro, Power Off, Music, Screen Recording, Bluetooth and System
+- [x] Homebrew releases and in-app updates
+- [ ] Bring the cleanup tools into the app
+- [ ] Configurable preferences
+- [ ] More utilities over time
 
-Nook is a work in progress. Ideas, suggestions, and contributions are welcome.
+Ideas and contributions are welcome: [open an issue](https://github.com/cs-tungthanh/nook/issues). The license hasn't been decided yet.
 
-## 📄 License
-
-The license has not been decided yet.
-
----
-
-Made for the little things that make your day easier.
-
-**Nook** — Your little corner of utilities.
+<p align="center"><sub>Made for the little things that make your day easier.</sub></p>
