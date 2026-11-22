@@ -87,10 +87,11 @@ Nook is built around a few simple principles:
 
 ```bash
 brew tap cs-tungthanh/tap
+brew trust cs-tungthanh/tap
 brew install nook
 ```
 
-`brew tap` adds the [cs-tungthanh/tap](https://github.com/cs-tungthanh/homebrew-tap) catalog once; after that, update with `brew upgrade nook` and remove with `brew uninstall nook`. Nook needs an Apple silicon Mac.
+`brew tap` adds the [cs-tungthanh/tap](https://github.com/cs-tungthanh/homebrew-tap) catalog, and `brew trust` lets Homebrew install from it (Homebrew asks this once for any tap outside its own). After that, update with `brew upgrade nook` and remove with `brew uninstall nook`. Nook needs an Apple silicon Mac.
 
 ### Requirements for building
 
