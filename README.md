@@ -202,7 +202,7 @@ The [Release workflow](.github/workflows/release.yml) builds Nook with that vers
 | `MACOS_CERT_P12` | No | Your signing certificate exported as `.p12`, base64-encoded |
 | `MACOS_CERT_PASSWORD` | No | The `.p12` export password |
 
-Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Screen Recording and Microphone permissions after every upgrade.
+Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Screen Recording and Microphone permissions after every upgrade. A Developer ID certificate works, and so does a free self-signed one (Keychain Access → Certificate Assistant → Create a Certificate…, type **Code Signing**). Either way, keep the same certificate for every release; the build log shows "Signing with identity …" when it's used.
 
 </details>
 
