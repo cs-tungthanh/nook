@@ -186,8 +186,10 @@ func run() error {
 	)
 
 	// A proxy lets the check reach sites the local network blocks, the way
-	// a VPN does for the normal browser. Edge also resolves names through
-	// the proxy, so DNS blocks on the local network do not apply.
+	// a VPN does for the normal browser. With http(s) and socks5 proxies Edge
+	// also resolves names through the proxy, so DNS blocks on the local
+	// network do not apply; socks4 cannot carry names, so Edge resolves them
+	// locally and DNS blocks still do.
 	if *proxy != "" {
 		opts = append(opts, chromedp.ProxyServer(*proxy))
 		fmt.Printf("Using proxy %s\n", *proxy)
@@ -370,12 +372,17 @@ func checkBookmark(browserCtx context.Context, oldURL string, waitSeconds, timeo
 	// JavaScript navigation can interrupt the original navigation.
 	currentURL := oldURL
 	deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
+	// A page whose URL has stayed put this long after loading is not going
+	// to redirect, so there's no need to wait out the rest of -wait.
+	const settled = time.Second
+	lastChange := time.Now()
 
 	for {
 		location, locationErr := chromedp.Run(ctx, chromedp.Location())
 
-		if locationErr == nil && location != "" {
+		if locationErr == nil && location != "" && location != currentURL {
 			currentURL = location
+			lastChange = time.Now()
 		}
 
 		if isLoginRedirect(currentURL) {
@@ -384,6 +391,13 @@ func checkBookmark(browserCtx context.Context, oldURL string, waitSeconds, timeo
 
 		if ctx.Err() != nil || time.Now().After(deadline) {
 			break
+		}
+
+		if time.Since(lastChange) >= settled {
+			ready, err := chromedp.Run(ctx, chromedp.Evaluate[string](`document.readyState`))
+			if err == nil && ready == "complete" {
+				break
+			}
 		}
 
 		time.Sleep(250 * time.Millisecond)
@@ -424,7 +438,18 @@ func checkBookmark(browserCtx context.Context, oldURL string, waitSeconds, timeo
 		}
 	}
 
-	if currentURL == oldURL {
+	// A page that answered with an error must not replace a working URL.
+	status, _ := chromedp.Run(ctx, chromedp.Evaluate[int](
+		`(performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0`,
+	))
+	if status >= 400 {
+		return bookmarkResult{
+			report: fmt.Sprintf("  SKIP: page answered HTTP %d: %s\n", status, currentURL),
+			skip:   true,
+		}
+	}
+
+	if sameURL(currentURL, oldURL) {
 		if navErr != nil {
 			return bookmarkResult{report: fmt.Sprintf("  WARNING: navigation error: %v\n", navErr)}
 		}
@@ -435,6 +460,40 @@ func checkBookmark(browserCtx context.Context, oldURL string, waitSeconds, timeo
 		newURL: currentURL,
 		report: fmt.Sprintf("  OLD: %s\n  NEW: %s\n", oldURL, currentURL),
 	}
+}
+
+// sameURL reports whether two URLs differ only in ways Edge normalizes:
+// letter case in the scheme and host, a default port, or an empty path
+// that becomes "/".
+func sameURL(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return normalizeURL(ua) == normalizeURL(ub)
+}
+
+func normalizeURL(u *url.URL) string {
+	n := *u
+	n.Scheme = strings.ToLower(n.Scheme)
+	host := strings.ToLower(n.Hostname())
+	port := n.Port()
+	if (n.Scheme == "http" && port == "80") || (n.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	n.Host = host
+	if n.Path == "" {
+		n.Path = "/"
+	}
+	n.RawPath = ""
+	return n.String()
 }
 
 // validateProxy rejects proxy URLs that Edge's --proxy-server cannot use.
