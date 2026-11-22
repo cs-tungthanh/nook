@@ -157,6 +157,11 @@ private enum Constants {
         static let searchDebounce: TimeInterval = 0.3
         static let searchResultLimit = 15
         static let recentSearchLimit = 10
+        /// Videos played recently that recommendations are drawn from
+        static let recommendationSeeds = 3
+        static let recommendationLimit = 15
+        /// How long recommendations are reused while what you played stays the same
+        static let recommendationLifetime: TimeInterval = 600
         /// Stations kept in "Recently Played"
         static let recentlyPlayedLimit = 15
         /// How far the rewind and forward buttons jump
@@ -177,6 +182,7 @@ private enum Constants {
             static let customStations = "music.customStations"
             static let recentSearches = "music.recentSearches"
             static let recentlyPlayed = "music.recentlyPlayed"
+            static let autoplay = "music.autoplay"
         }
     }
 }
@@ -2380,6 +2386,33 @@ private enum YouTube {
         return Array(results.prefix(Constants.Music.searchResultLimit))
     }
 
+    /// The videos YouTube lists as "Up next" beside `videoID`, which needs no
+    /// sign-in. Recommendations on the empty search page are built from these.
+    static func related(to videoID: String) async throws -> [MusicSearchResult] {
+        var request = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/next?prettyPrint=false")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "context": ["client": ["clientName": "WEB", "clientVersion": Constants.Music.clientVersion, "hl": "en"]],
+            "videoId": videoID
+        ])
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw MusicError.network
+        }
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw MusicError.network }
+        let json = try JSONSerialization.jsonObject(with: data)
+        let items = dig(json, "contents", "twoColumnWatchNextResults", "secondaryResults",
+                        "secondaryResults", "results") as? [Any] ?? []
+        return items.compactMap { item in
+            (dig(item, "lockupViewModel") as? [String: Any]).flatMap(lockupVideo)
+                ?? (dig(item, "compactVideoRenderer") as? [String: Any]).flatMap(video)
+        }
+    }
+
     /// The title of a video or playlist, after checking it can be played
     /// outside YouTube. Throws `MusicError` when it can't.
     static func playableTitle(of source: MusicStation.Source) async throws -> String {
@@ -2423,6 +2456,31 @@ private enum YouTube {
             detail: isLive ? "LIVE" : length,
             thumbnail: URL(string: "https://i.ytimg.com/vi/\(id)/mqdefault.jpg"),
             durationSeconds: isLive ? nil : seconds(fromClock: length)
+        )
+    }
+
+    /// A video in YouTube's newer "lockup" layout, used by the Up next list
+    private static func lockupVideo(_ lockup: [String: Any]) -> MusicSearchResult? {
+        guard lockup["contentType"] as? String == "LOCKUP_CONTENT_TYPE_VIDEO",
+              let id = lockup["contentId"] as? String else { return nil }
+        let metadata = dig(lockup, "metadata", "lockupMetadataViewModel")
+        // The length, or LIVE, is a badge on the thumbnail
+        let overlays = dig(lockup, "contentImage", "thumbnailViewModel", "overlays") as? [Any] ?? []
+        let badge = overlays.lazy.compactMap { overlay -> [String: Any]? in
+            (dig(overlay, "thumbnailBottomOverlayViewModel", "badges", 0, "thumbnailBadgeViewModel")
+                ?? dig(overlay, "thumbnailOverlayBadgeViewModel", "thumbnailBadges", 0, "thumbnailBadgeViewModel")) as? [String: Any]
+        }.first
+        let badgeText = badge?["text"] as? String ?? ""
+        let isLive = badgeText.uppercased() == "LIVE" || (badge?["badgeStyle"] as? String ?? "").contains("LIVE")
+        return MusicSearchResult(
+            id: id,
+            kind: isLive ? .live : .video,
+            title: dig(metadata, "title", "content") as? String ?? "Video",
+            channel: dig(metadata, "metadata", "contentMetadataViewModel", "metadataRows", 0,
+                         "metadataParts", 0, "text", "content") as? String ?? "",
+            detail: isLive ? "LIVE" : badgeText,
+            thumbnail: URL(string: "https://i.ytimg.com/vi/\(id)/mqdefault.jpg"),
+            durationSeconds: isLive ? nil : seconds(fromClock: badgeText)
         )
     }
 
@@ -2872,6 +2930,10 @@ final class MusicPlayer: NSObject, ObservableObject {
     @Published private(set) var recentlyPlayed: [MusicStation] {
         didSet { save(recentlyPlayed, forKey: Constants.Music.Keys.recentlyPlayed) }
     }
+    /// When a video ends with nothing after it, play a related one next
+    @Published var autoplay: Bool {
+        didSet { defaults.set(autoplay, forKey: Constants.Music.Keys.autoplay) }
+    }
     @Published var volume: Double {
         didSet {
             defaults.set(volume, forKey: Constants.Music.Keys.volume)
@@ -2942,11 +3004,16 @@ final class MusicPlayer: NSObject, ObservableObject {
     }
     /// Live stream IDs found for presets this session
     private var liveStreams: [String: String] = [:]
+    /// Videos autoplay picked this session, so it doesn't circle back to them
+    private var autoplayed: [String] = []
+    private var autoplayTask: Task<Void, Never>?
     private var noticeWork: DispatchWorkItem?
 
     override init() {
-        defaults.register(defaults: [Constants.Music.Keys.volume: Constants.Music.defaultVolume])
+        defaults.register(defaults: [Constants.Music.Keys.volume: Constants.Music.defaultVolume,
+                                     Constants.Music.Keys.autoplay: true])
         volume = defaults.double(forKey: Constants.Music.Keys.volume)
+        autoplay = defaults.bool(forKey: Constants.Music.Keys.autoplay)
         customStations = Self.load([MusicStation].self, forKey: Constants.Music.Keys.customStations) ?? []
         recentlyPlayed = Self.load([MusicStation].self, forKey: Constants.Music.Keys.recentlyPlayed) ?? []
         station = Self.load(MusicStation.self, forKey: Constants.Music.Keys.lastStation) ?? MusicStation.presets[0]
@@ -3015,7 +3082,43 @@ final class MusicPlayer: NSObject, ObservableObject {
         }
     }
 
+    /// Moves on in a playlist; at its end, or on a single video, plays a
+    /// related video when autoplay is on
     func next() { run("nook.next()") }
+
+    /// A playlist always has somewhere to go; a single video only with autoplay
+    var canGoNext: Bool {
+        guard let station = station, status != .idle else { return false }
+        if station.isPlaylist { return true }
+        if case .video = station.source { return autoplay }
+        return false
+    }
+
+    var canGoPrevious: Bool { station?.isPlaylist == true && status != .idle }
+
+    /// Plays the first video in `videoID`'s Up next list that hasn't played
+    /// lately and can play outside YouTube. Gives up quietly if none can.
+    private func playRelated(after videoID: String) {
+        guard let current = station else { return }
+        var known = Set(autoplayed + [videoID])
+        for station in recentlyPlayed + customStations {
+            if case .video(let id) = station.source { known.insert(id) }
+        }
+        autoplayTask?.cancel()
+        autoplayTask = Task { @MainActor [weak self] in
+            let candidates = ((try? await YouTube.related(to: videoID)) ?? [])
+                .filter { $0.kind == .video && !known.contains($0.id) }
+            for candidate in candidates.prefix(5) {
+                // Stop if you picked something else meanwhile
+                guard let self = self, !Task.isCancelled, self.station == current else { return }
+                guard (try? await YouTube.playableTitle(of: .video(candidate.id))) != nil else { continue }
+                guard !Task.isCancelled, self.station == current else { return }
+                self.autoplayed = Array((self.autoplayed + [candidate.id]).suffix(100))
+                self.play(MusicStation.youTube(.video(candidate.id), name: candidate.title))
+                return
+            }
+        }
+    }
 
     /// Jumps to `seconds` into the video playing now
     func seek(to seconds: Double) {
@@ -3242,10 +3345,25 @@ final class MusicPlayer: NSObject, ObservableObject {
             playerVars: { autoplay: 1, controls: 0, disablekb: 1, origin: '\(Constants.Music.origin)' },
             events: {
               onReady: () => { player.setVolume(volume); post({ event: 'ready' }); setInterval(reportTime, 1000); },
-              onStateChange: e => post({ event: 'state', state: e.data, title: (player.getVideoData() || {}).title || '', channel: (player.getVideoData() || {}).author || '', videoId: (player.getVideoData() || {}).video_id || '' }),
+              onStateChange: e => {
+                post({ event: 'state', state: e.data, title: (player.getVideoData() || {}).title || '', channel: (player.getVideoData() || {}).author || '', videoId: (player.getVideoData() || {}).video_id || '' });
+                if (e.data === YT.PlayerState.ENDED) { finishedOrNext(false); }
+              },
               onError: e => post({ event: 'error', code: e.data })
             }
           });
+        }
+
+        // Nothing follows the video playing now (a single video, or a playlist's
+        // last): tell Nook, which may autoplay something related. Mid-playlist,
+        // YouTube moves on by itself, or `advance` does.
+        function finishedOrNext(advance) {
+          const list = player.getPlaylist() || [], index = player.getPlaylistIndex();
+          if (list.length > 1 && index >= 0 && index < list.length - 1) {
+            if (advance) { player.nextVideo(); }
+            return;
+          }
+          post({ event: 'finished', videoId: (player.getVideoData() || {}).video_id || '' });
         }
 
         // Fades the old station out, then starts the new one. Pausing or a
@@ -3295,7 +3413,7 @@ final class MusicPlayer: NSObject, ObservableObject {
             if (pendingStart) { finishFade(false); }
             else { player.pauseVideo(); }
           },
-          next() { player.nextVideo(); },
+          next() { finishedOrNext(true); },
           seek(seconds) { if (!pendingStart) { player.seekTo(seconds, true); lastReport = null; } },
           previous() { player.previousVideo(); },
           // During a fade only remember the volume; the new station starts at it
@@ -3342,6 +3460,12 @@ final class MusicPlayer: NSObject, ObservableObject {
             default:
                 break
             }
+        case "finished":
+            guard autoplay, let station = station,
+                  let finished = event["videoId"] as? String, !finished.isEmpty else { return }
+            // Live stations stay themselves; only videos and playlists autoplay
+            if case .liveSearch = station.source { return }
+            playRelated(after: finished)
         case "time":
             // A new station is on its way: the old video's last ticks don't count
             guard status != .loading || isSeeking else { return }
@@ -3410,8 +3534,23 @@ final class MusicSearch: ObservableObject {
     /// The result being checked before it plays
     @Published private(set) var checkingID: String?
     @Published private(set) var recentSearches: [String]
+    /// Shown while nothing is typed: videos related to what you played
+    @Published private(set) var recommendations: [MusicSearchResult] = []
+    /// The title of the video the recommendations mostly come from
+    @Published private(set) var recommendationSource: String?
+    @Published private(set) var isLoadingRecommendations = false
+
+    /// What the arrow keys and Return act on: the recommendations while
+    /// nothing is typed, the search results otherwise
+    var visibleResults: [MusicSearchResult] {
+        query.trimmingCharacters(in: .whitespaces).isEmpty ? recommendations : results
+    }
 
     private let player: MusicPlayer
+    private var recommendationTask: Task<Void, Never>?
+    /// The videos the current recommendations were drawn from, and when
+    private var recommendationSeedIDs: [String] = []
+    private var recommendationsLoaded = Date.distantPast
     private var searchTask: Task<Void, Never>?
     private var playTask: Task<Void, Never>?
 
@@ -3423,6 +3562,7 @@ final class MusicSearch: ObservableObject {
     func present() {
         isPresented = true
         selection = 0
+        refreshRecommendations()
     }
 
     func dismiss() {
@@ -3434,6 +3574,7 @@ final class MusicSearch: ObservableObject {
     }
 
     func playSelected(saving: Bool) {
+        let results = visibleResults
         guard results.indices.contains(selection) else { return }
         play(results[selection], saving: saving)
     }
@@ -3468,7 +3609,8 @@ final class MusicSearch: ObservableObject {
         case Constants.Island.escapeKeyCode:
             dismiss()
         case 125: // down
-            if !results.isEmpty { selection = min(selection + 1, results.count - 1) }
+            let count = visibleResults.count
+            if count > 0 { selection = min(selection + 1, count - 1) }
         case 126: // up
             selection = max(selection - 1, 0)
         case 36, 76: // return, keypad enter
@@ -3486,6 +3628,7 @@ final class MusicSearch: ObservableObject {
             results = []
             isSearching = false
             errorMessage = nil
+            selection = 0
             return
         }
         let filter = self.filter
@@ -3505,6 +3648,68 @@ final class MusicSearch: ObservableObject {
                 self.errorMessage = (error as? LocalizedError)?.errorDescription ?? "Search failed"
             }
             self?.isSearching = false
+        }
+    }
+
+    // MARK: Recommendations
+
+    /// Loads videos related to the last few you played, unless the ones
+    /// shown were drawn from the same videos a short while ago
+    private func refreshRecommendations() {
+        var seeds: [(id: String, title: String)] = []
+        if let id = player.videoID { seeds.append((id, player.title ?? "")) }
+        for station in player.recentlyPlayed {
+            if case .video(let id) = station.source { seeds.append((id, station.name)) }
+        }
+        var seen = Set<String>()
+        seeds = Array(seeds.filter { seen.insert($0.id).inserted }.prefix(Constants.Music.recommendationSeeds))
+        let seedIDs = seeds.map(\.id)
+        guard !seedIDs.isEmpty else {
+            recommendations = []
+            recommendationSource = nil
+            return
+        }
+        if seedIDs == recommendationSeedIDs, !recommendations.isEmpty,
+           Date().timeIntervalSince(recommendationsLoaded) < Constants.Music.recommendationLifetime {
+            return
+        }
+
+        // Played or saved already: not worth recommending
+        var known = Set(seedIDs)
+        for station in player.recentlyPlayed + player.customStations {
+            if case .video(let id) = station.source { known.insert(id) }
+        }
+        recommendationTask?.cancel()
+        isLoadingRecommendations = true
+        recommendationTask = Task { @MainActor [weak self] in
+            // Each seed's list in its own order, fetched side by side
+            let lists = await withTaskGroup(of: (Int, [MusicSearchResult]).self) { group in
+                for (index, seed) in seeds.enumerated() {
+                    group.addTask { (index, (try? await YouTube.related(to: seed.id)) ?? []) }
+                }
+                var lists = Array(repeating: [MusicSearchResult](), count: seeds.count)
+                for await (index, list) in group { lists[index] = list }
+                return lists
+            }
+            guard let self = self, !Task.isCancelled else { return }
+            // Take turns between the seeds so no single video crowds out the rest
+            var picked: [MusicSearchResult] = []
+            var pickedIDs = known
+            var position = 0
+            while picked.count < Constants.Music.recommendationLimit,
+                  lists.contains(where: { $0.count > position }) {
+                for list in lists where list.count > position {
+                    let candidate = list[position]
+                    if pickedIDs.insert(candidate.id).inserted { picked.append(candidate) }
+                }
+                position += 1
+            }
+            self.recommendations = Array(picked.prefix(Constants.Music.recommendationLimit))
+            self.recommendationSource = seeds.first.map { $0.title.isEmpty ? nil : $0.title } ?? nil
+            self.recommendationSeedIDs = seedIDs
+            self.recommendationsLoaded = Date()
+            self.isLoadingRecommendations = false
+            if self.query.trimmingCharacters(in: .whitespaces).isEmpty { self.selection = 0 }
         }
     }
 
@@ -4015,7 +4220,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         menu.addItem(ClosureMenuItem(title: music.isActive ? "Pause" : "Play") { [weak self] in
             self?.music.togglePlayPause()
         })
-        if music.station?.isPlaylist == true {
+        if music.canGoNext {
             menu.addItem(ClosureMenuItem(title: "Next") { [weak self] in self?.music.next() })
         }
         if music.progress.canSeek {
@@ -4028,6 +4233,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 self?.afterClosingIsland { self?.music.openInBrowser() }
             })
         }
+        let autoplay = ClosureMenuItem(title: "Autoplay Related Videos") { [weak self] in
+            self?.music.autoplay.toggle()
+        }
+        autoplay.state = music.autoplay ? .on : .off
+        autoplay.toolTip = "When a video or playlist ends, play a related video next"
+        menu.addItem(autoplay)
         menu.addItem(.separator())
         for station in music.stations {
             let item = ClosureMenuItem(title: station.menuTitle) { [weak self] in self?.music.play(station) }
@@ -5132,12 +5343,11 @@ struct ContentView: View {
     }
 
     private var musicTransport: some View {
-        let canSkip = music.station?.isPlaylist == true && music.status != .idle
-        return HStack(spacing: 2) {
-            musicButton("backward.fill", label: "Previous", enabled: canSkip, action: music.previous)
+        HStack(spacing: 2) {
+            musicButton("backward.fill", label: "Previous", enabled: music.canGoPrevious, action: music.previous)
             musicButton(music.isActive ? "pause.fill" : "play.fill", label: music.isActive ? "Pause" : "Play",
                         enabled: music.station != nil, action: music.togglePlayPause)
-            musicButton("forward.fill", label: "Next", enabled: canSkip, action: music.next)
+            musicButton("forward.fill", label: "Next", enabled: music.canGoNext, action: music.next)
         }
     }
 
@@ -5258,11 +5468,16 @@ struct ContentView: View {
             SegmentedPicker(selection: $musicSearch.filter, options: MusicSearchFilter.allCases) { $0.title }
 
             if musicSearch.query.trimmingCharacters(in: .whitespaces).isEmpty {
-                recentSearchesView
+                if musicSearch.recommendations.isEmpty && !musicSearch.isLoadingRecommendations {
+                    recentSearchesView
+                } else {
+                    recentSearchChips
+                    recommendationsView
+                }
             } else if let error = musicSearch.errorMessage, musicSearch.results.isEmpty {
                 statusRow(icon: "exclamationmark.triangle", text: error)
             } else {
-                searchResultsList
+                searchResultsList(musicSearch.results, height: 380)
             }
 
             Text("↑↓ select · ⏎ play now · ⌘⏎ play and save · Esc back")
@@ -5318,11 +5533,78 @@ struct ContentView: View {
         }
     }
 
-    private var searchResultsList: some View {
+    /// Recent searches in one row, so the recommendations get the room
+    @ViewBuilder
+    private var recentSearchChips: some View {
+        if !musicSearch.recentSearches.isEmpty {
+            HStack(spacing: 6) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(musicSearch.recentSearches, id: \.self) { recent in
+                            Button(action: { musicSearch.query = recent }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "clock.arrow.circlepath")
+                                    Text(recent).lineLimit(1)
+                                }
+                                .font(.caption)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(Color.white.opacity(0.08)))
+                                .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Search \(recent)")
+                        }
+                    }
+                }
+                Button(action: musicSearch.clearRecentSearches) {
+                    Text("Clear")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                }
+                .buttonStyle(CustomPlainButtonStyle())
+                .cornerRadius(5)
+                .accessibilityLabel("Clear recent searches")
+            }
+        }
+    }
+
+    private var recommendationsView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text("Recommended")
+                    .font(.caption.weight(.semibold))
+                if let source = musicSearch.recommendationSource {
+                    Text("· Because you played \(source)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 0)
+            }
+            if musicSearch.recommendations.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Finding videos like the ones you played…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 330)
+            } else {
+                searchResultsList(musicSearch.recommendations, height: 330)
+            }
+        }
+    }
+
+    private func searchResultsList(_ results: [MusicSearchResult], height: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 2) {
-                    ForEach(Array(musicSearch.results.enumerated()), id: \.element.id) { index, result in
+                    ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
                         searchResultRow(result, isSelected: index == musicSearch.selection)
                             .id(result.id)
                             .contentShape(Rectangle())
@@ -5331,10 +5613,10 @@ struct ContentView: View {
                     }
                 }
             }
-            .frame(height: 380)
+            .frame(height: height)
             .onChange(of: musicSearch.selection) { selection in
-                guard musicSearch.results.indices.contains(selection) else { return }
-                proxy.scrollTo(musicSearch.results[selection].id)
+                guard results.indices.contains(selection) else { return }
+                proxy.scrollTo(results[selection].id)
             }
         }
     }
@@ -5787,6 +6069,27 @@ private struct MusicProgressRow: View {
                 timeLabel(progress.duration)
                 skipButton("goforward.10", label: "Forward 10 seconds", by: Constants.Music.seekStepSeconds)
             }
+        } else if progress.isLive {
+            // Says why there's no seek bar, at the bar's height so the tile
+            // doesn't jump when switching between a stream and a video
+            HStack(spacing: 6) {
+                HStack(spacing: 4) {
+                    Circle().fill(Color.red).frame(width: 6, height: 6)
+                    Text("LIVE")
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(.red)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.white.opacity(0.08)))
+                Text("Live stream · always plays the latest moment")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .frame(height: 20)
+            .accessibilityElement(children: .combine)
         }
     }
 

@@ -77,6 +77,8 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 
 - Pick a station: **Study**, **Sleep**, **Focus** or **Jazz**. Each plays a current live stream, so it never goes stale.
 - Press 🔍 to search YouTube. Filter by **Live**, **Playlists** or **Long (1h+)**, choose with ↑↓ and press Return to play, or ⌘Return to also save it as a station. Your last 10 searches stay listed.
+- When a video or playlist ends with nothing after it, Nook plays a related video next, like YouTube's autoplay, and ⏩ does the same on a single video. Turn it off with **Autoplay Related Videos** in the station menu. Live stations don't autoplay.
+- Before you type, search shows **Recommended**: videos YouTube lists alongside the last few you played in Nook, leaving out ones you've already played or saved.
 - Save search results with **☆ Save**, or **Add from YouTube Link…**. **Recently Played** lists the last 15 stations.
 - Switching stations fades the old music out. If something can't play outside YouTube, Nook says so and goes back to what was playing.
 - Music keeps playing with the island closed, with a ♪ icon in the menu bar. Right-click the menu bar icon to play, pause or switch stations.
