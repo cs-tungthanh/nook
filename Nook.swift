@@ -3,6 +3,8 @@ import AppKit
 import UserNotifications
 import ScreenCaptureKit
 import AVFoundation
+import CoreAudio
+import Combine
 import CoreImage
 import UniformTypeIdentifiers
 import IOBluetooth
@@ -58,7 +60,11 @@ private enum Constants {
     enum Pomodoro {
         static let defaultIntervalMinutes = 20
         static let defaultDurationSeconds = 120
-        static let durationOptions = [120, 300, 600, 1200]
+        /// Presets for the Focus and Break pickers; anything else is Custom
+        static let intervalOptions = [20, 25, 50]
+        static let durationOptions = [120, 300, 600]
+        static let minDurationSeconds = 60
+        static let maxDurationSeconds = 3600
         static let minIntervalMinutes = 1
         static let maxIntervalMinutes = 180
         static let snoozeMinutes = 5
@@ -78,6 +84,8 @@ private enum Constants {
             static let intervalMinutes = "breakReminder.intervalMinutes"
             static let durationSeconds = "breakReminder.durationSeconds"
             static let mode = "breakReminder.mode"
+            static let customInterval = "breakReminder.customInterval"
+            static let customDuration = "breakReminder.customDuration"
         }
     }
 
@@ -185,7 +193,15 @@ private enum Constants {
             static let recentSearches = "music.recentSearches"
             static let recentlyPlayed = "music.recentlyPlayed"
             static let autoplay = "music.autoplay"
+            static let resumeWhenQuiet = "music.resumeWhenQuiet"
+            static let resumeWhenQuietCustom = "music.resumeWhenQuietCustom"
         }
+
+        /// Minutes of silence before "Resume When Quiet" starts the music again
+        static let resumeWhenQuietChoices = [1, 5]
+        /// How far a custom delay can go
+        static let resumeWhenQuietCustomRange = 1...120
+        static let resumeWhenQuietHelp = "When nothing on your Mac has made a sound for a while, start the music again"
     }
 }
 
@@ -268,6 +284,32 @@ enum BreakMode: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Custom Values
+
+/// The Custom choice of a setting that also has presets, like Break's
+/// 2m · 5m · 10m · Custom. `isSelected` keeps Custom picked even when its
+/// value happens to equal a preset, so stepping through 5m doesn't jump.
+struct CustomValue: Equatable {
+    var isSelected: Bool
+    var value: Int
+
+    /// Loads the saved custom choice. A saved `current` that isn't a preset
+    /// (from before the setting had presets) becomes the custom value.
+    static func load(forKey key: String, current: Int, presets: [Int], defaultValue: Int) -> CustomValue {
+        let defaults = UserDefaults.standard
+        if current != 0 && !presets.contains(current) {
+            return CustomValue(isSelected: true, value: current)
+        }
+        return CustomValue(isSelected: defaults.bool(forKey: key + ".isSelected"),
+                           value: defaults.object(forKey: key + ".value") as? Int ?? defaultValue)
+    }
+
+    func save(forKey key: String) {
+        UserDefaults.standard.set(isSelected, forKey: key + ".isSelected")
+        UserDefaults.standard.set(value, forKey: key + ".value")
+    }
+}
+
 final class Pomodoro: ObservableObject {
     enum Phase: Equatable {
         case off
@@ -326,6 +368,22 @@ final class Pomodoro: ObservableObject {
         didSet { defaults.set(durationSeconds, forKey: Constants.Pomodoro.Keys.durationSeconds) }
     }
 
+    /// Focus's Custom choice; while it's picked, `intervalMinutes` follows it
+    @Published var customInterval: CustomValue {
+        didSet {
+            customInterval.save(forKey: Constants.Pomodoro.Keys.customInterval)
+            if customInterval.isSelected { intervalMinutes = customInterval.value }
+        }
+    }
+
+    /// Break's Custom choice, in seconds; while it's picked, `durationSeconds` follows it
+    @Published var customDuration: CustomValue {
+        didSet {
+            customDuration.save(forKey: Constants.Pomodoro.Keys.customDuration)
+            if customDuration.isSelected { durationSeconds = customDuration.value }
+        }
+    }
+
     @Published var mode: BreakMode {
         didSet { defaults.set(mode.rawValue, forKey: Constants.Pomodoro.Keys.mode) }
     }
@@ -356,11 +414,17 @@ final class Pomodoro: ObservableObject {
             Constants.Pomodoro.Keys.mode: BreakMode.notification.rawValue
         ])
         isEnabled = defaults.bool(forKey: Constants.Pomodoro.Keys.enabled)
-        intervalMinutes = defaults.integer(forKey: Constants.Pomodoro.Keys.intervalMinutes)
+        let storedInterval = defaults.integer(forKey: Constants.Pomodoro.Keys.intervalMinutes)
+        intervalMinutes = storedInterval
         let storedDuration = defaults.integer(forKey: Constants.Pomodoro.Keys.durationSeconds)
-        durationSeconds = Constants.Pomodoro.durationOptions.contains(storedDuration)
+        let duration = (Constants.Pomodoro.minDurationSeconds...Constants.Pomodoro.maxDurationSeconds).contains(storedDuration)
             ? storedDuration
             : Constants.Pomodoro.defaultDurationSeconds
+        durationSeconds = duration
+        customInterval = .load(forKey: Constants.Pomodoro.Keys.customInterval, current: storedInterval,
+                               presets: Constants.Pomodoro.intervalOptions, defaultValue: 30)
+        customDuration = .load(forKey: Constants.Pomodoro.Keys.customDuration, current: duration,
+                               presets: Constants.Pomodoro.durationOptions, defaultValue: 15 * Constants.Time.secondsPerMinute)
         mode = BreakMode(rawValue: defaults.string(forKey: Constants.Pomodoro.Keys.mode) ?? "") ?? .notification
 
         observeSystemEvents()
@@ -3730,6 +3794,122 @@ final class MusicSearch: ObservableObject {
     }
 }
 
+// MARK: - Resume When Quiet
+
+/// Starts the music again once the Mac has been silent for a while, so a
+/// pause for a call or a video doesn't end the music for the day. It asks
+/// CoreAudio whether anything is playing on the output device and is told
+/// when that changes, so it costs nothing while waiting.
+final class QuietResume: ObservableObject {
+    /// Minutes of silence before resuming; 0 turns it off
+    @Published var minutes: Int {
+        didSet {
+            defaults.set(minutes, forKey: Constants.Music.Keys.resumeWhenQuiet)
+            evaluate()
+        }
+    }
+    /// The user's own delay; while it's picked, `minutes` follows it
+    @Published var custom: CustomValue {
+        didSet {
+            custom.save(forKey: Constants.Music.Keys.resumeWhenQuietCustom)
+            if custom.isSelected { minutes = custom.value }
+        }
+    }
+
+    private let music: MusicPlayer
+    private let defaults = UserDefaults.standard
+    private var device = AudioDeviceID(0)
+    private var timer: Timer?
+    /// Sleep, display sleep or a locked screen: nobody is there to listen
+    private var awayReasons: Set<String> = []
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var statusSubscription: AnyCancellable?
+
+    private var runningAddress = QuietResume.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
+    private var defaultDeviceAddress = QuietResume.address(kAudioHardwarePropertyDefaultOutputDevice)
+    private lazy var runningListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        self?.evaluate()
+    }
+    private lazy var deviceListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        self?.attachToDefaultDevice()
+    }
+
+    init(music: MusicPlayer) {
+        self.music = music
+        let stored = defaults.integer(forKey: Constants.Music.Keys.resumeWhenQuiet)
+        minutes = stored
+        custom = .load(forKey: Constants.Music.Keys.resumeWhenQuietCustom, current: stored,
+                       presets: Constants.Music.resumeWhenQuietChoices, defaultValue: 15)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                            &defaultDeviceAddress, .main, deviceListener)
+        attachToDefaultDevice()
+        observeAway()
+        statusSubscription = music.$status.dropFirst().receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.evaluate() }
+    }
+
+    /// Starts the countdown when everything is quiet, and stops it when anything isn't
+    private func evaluate() {
+        timer?.invalidate()
+        timer = nil
+        guard isQuiet else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { [weak self] _ in
+            guard let self = self, self.isQuiet else { return }
+            // Plays the current station, or the last one, or the first preset
+            self.music.togglePlayPause()
+        }
+    }
+
+    private var isQuiet: Bool {
+        minutes > 0 && awayReasons.isEmpty && !music.isActive && !isOutputRunning
+    }
+
+    private var isOutputRunning: Bool {
+        var running = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        AudioObjectGetPropertyData(device, &runningAddress, 0, nil, &size, &running)
+        return running != 0
+    }
+
+    private func attachToDefaultDevice() {
+        if device != 0 {
+            AudioObjectRemovePropertyListenerBlock(device, &runningAddress, .main, runningListener)
+        }
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                   &defaultDeviceAddress, 0, nil, &size, &device)
+        AudioObjectAddPropertyListenerBlock(device, &runningAddress, .main, runningListener)
+        evaluate()
+    }
+
+    private func observeAway() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        let distributed = DistributedNotificationCenter.default()
+        let events: [(NotificationCenter, Notification.Name, String, Bool)] = [
+            (workspace, NSWorkspace.willSleepNotification, "sleep", true),
+            (workspace, NSWorkspace.didWakeNotification, "sleep", false),
+            (workspace, NSWorkspace.screensDidSleepNotification, "display", true),
+            (workspace, NSWorkspace.screensDidWakeNotification, "display", false),
+            (distributed, Notification.Name("com.apple.screenIsLocked"), "lock", true),
+            (distributed, Notification.Name("com.apple.screenIsUnlocked"), "lock", false)
+        ]
+        observers = events.map { center, name, reason, isAway in
+            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else { return }
+                if isAway { self.awayReasons.insert(reason) } else { self.awayReasons.remove(reason) }
+                // Coming back restarts the countdown from zero
+                self.evaluate()
+            }
+            return (center, token)
+        }
+    }
+
+    private static func address(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                   mElement: kAudioObjectPropertyElementMain)
+    }
+}
+
 // MARK: - Updates
 
 /// Checks GitHub for a newer Nook release and installs it.
@@ -4059,6 +4239,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let youTubeAccount = YouTubeAccount()
     let updater = Updater()
     lazy var musicSearch = MusicSearch(player: music)
+    lazy var quietResume = QuietResume(music: music)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         requestNotificationPermissions()
@@ -4075,6 +4256,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             self?.updateStatusItem()
         }
         music.account = youTubeAccount
+        _ = quietResume
         Task { await youTubeAccount.refreshPlaylists() }
         updater.start()
     }
@@ -4208,6 +4390,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         statusItem.menu = nil
     }
 
+    /// "Resume When Quiet": Off, or after a few minutes without any sound
+    private func resumeWhenQuietItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Resume When Quiet", action: nil, keyEquivalent: "")
+        item.toolTip = Constants.Music.resumeWhenQuietHelp
+        let submenu = NSMenu()
+        let choices = [0] + Constants.Music.resumeWhenQuietChoices
+        for minutes in choices {
+            let choice = ClosureMenuItem(title: minutes == 0 ? "Off" : "After \(Self.minutesText(minutes))") { [weak self] in
+                self?.quietResume.custom.isSelected = false
+                self?.quietResume.minutes = minutes
+            }
+            choice.state = !quietResume.custom.isSelected && quietResume.minutes == minutes ? .on : .off
+            submenu.addItem(choice)
+        }
+        // Its value is set in the island's Music tile
+        let custom = ClosureMenuItem(title: "Custom: After \(Self.minutesText(quietResume.custom.value))") { [weak self] in
+            self?.quietResume.custom.isSelected = true
+        }
+        custom.state = quietResume.custom.isSelected ? .on : .off
+        submenu.addItem(custom)
+        item.submenu = submenu
+        return item
+    }
+
+    private static func minutesText(_ minutes: Int) -> String {
+        "\(minutes) Minute\(minutes == 1 ? "" : "s")"
+    }
+
     /// The station menu, shared by the menu bar icon and the Music tile. The
     /// tile passes `onAddLink` to also offer adding and removing stations.
     func musicMenu(onAddLink: (() -> Void)? = nil) -> NSMenu {
@@ -4241,6 +4451,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         autoplay.state = music.autoplay ? .on : .off
         autoplay.toolTip = "When a video or playlist ends, play a related video next"
         menu.addItem(autoplay)
+        menu.addItem(resumeWhenQuietItem())
         menu.addItem(.separator())
         for station in music.stations {
             let item = ClosureMenuItem(title: station.menuTitle) { [weak self] in self?.music.play(station) }
@@ -4327,7 +4538,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func setupIsland() {
-        island = IslandController(content: ContentView(appDelegate: self, pomodoro: pomodoro, screenRecorder: screenRecorder, bluetooth: bluetooth, system: systemMonitor, music: music, musicSearch: musicSearch, updater: updater))
+        island = IslandController(content: ContentView(appDelegate: self, pomodoro: pomodoro, screenRecorder: screenRecorder, bluetooth: bluetooth, system: systemMonitor, music: music, musicSearch: musicSearch, quietResume: quietResume, updater: updater))
         island.onDismiss = { [weak self] in
             self?.closeIsland()
         }
@@ -4681,6 +4892,7 @@ struct ContentView: View {
     @ObservedObject var system: SystemMonitor
     @ObservedObject var music: MusicPlayer
     @ObservedObject var musicSearch: MusicSearch
+    @ObservedObject var quietResume: QuietResume
     @ObservedObject var updater: Updater
     @State private var shutdownMinutes = Constants.Shutdown.defaultMinutes
     @State private var showsAllDevices = false
@@ -4873,11 +5085,18 @@ struct ContentView: View {
             }
 
             settingRow("Focus") {
-                minuteStepper($pomodoro.intervalMinutes, in: Constants.Pomodoro.minIntervalMinutes...Constants.Pomodoro.maxIntervalMinutes)
+                PresetPicker(value: $pomodoro.intervalMinutes, custom: $pomodoro.customInterval,
+                             presets: Constants.Pomodoro.intervalOptions,
+                             customRange: Constants.Pomodoro.minIntervalMinutes...Constants.Pomodoro.maxIntervalMinutes) { minutes in
+                    "\(minutes)m"
+                }
             }
 
             settingRow("Break") {
-                SegmentedPicker(selection: $pomodoro.durationSeconds, options: Constants.Pomodoro.durationOptions) { seconds in
+                PresetPicker(value: $pomodoro.durationSeconds, custom: $pomodoro.customDuration,
+                             presets: Constants.Pomodoro.durationOptions,
+                             customRange: Constants.Pomodoro.minDurationSeconds...Constants.Pomodoro.maxDurationSeconds,
+                             unit: Constants.Time.secondsPerMinute) { seconds in
                     shortDurationText(seconds)
                 }
             }
@@ -5273,6 +5492,19 @@ struct ContentView: View {
                 Image(systemName: "speaker.wave.3.fill")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Text("Resume when quiet")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .help(Constants.Music.resumeWhenQuietHelp)
+                Spacer(minLength: 4)
+                PresetPicker(value: $quietResume.minutes, custom: $quietResume.custom,
+                             presets: [0] + Constants.Music.resumeWhenQuietChoices,
+                             customRange: Constants.Music.resumeWhenQuietCustomRange) { minutes in
+                    minutes == 0 ? "Off" : "\(minutes)m"
+                }
             }
         }
         .padding(.horizontal)
@@ -5988,38 +6220,6 @@ struct ContentView: View {
         }
     }
 
-    /// Steps by 1 below `Constants.Stepper.step` minutes and by that step above it.
-    private func minuteStepper(_ value: Binding<Int>, in range: ClosedRange<Int>) -> some View {
-        let step = Constants.Stepper.step
-        return Group {
-            Button(action: {
-                let current = value.wrappedValue
-                value.wrappedValue = max(range.lowerBound, current - (current > step ? step : 1))
-            }) {
-                Image(systemName: "minus.circle.fill")
-                    .font(.title3)
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(IconButtonStyle())
-
-            Text("\(value.wrappedValue) min")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .frame(minWidth: 60)
-
-            Button(action: {
-                let current = value.wrappedValue
-                value.wrappedValue = min(range.upperBound, current + (current >= step ? step : 1))
-            }) {
-                Image(systemName: "plus.circle.fill")
-                    .font(.title3)
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(IconButtonStyle())
-
-            Spacer()
-        }
-    }
-
     private func statusRow(icon: String, text: String, actionTitle: String? = nil, action: (() -> Void)? = nil) -> some View {
         var actions: [(String, () -> Void)] = []
         if let actionTitle = actionTitle, let action = action {
@@ -6405,6 +6605,104 @@ struct SegmentedPicker<Value: Hashable>: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// A few presets plus Custom, on one compact row: `20m · 25m · 50m · Custom`.
+/// Picking Custom turns that segment into its own `− 30m +` stepper.
+struct PresetPicker: View {
+    @Binding var value: Int
+    @Binding var custom: CustomValue
+    let presets: [Int]
+    let customRange: ClosedRange<Int>
+    /// What one step of the stepper is worth: 1 for minutes, 60 for seconds
+    var unit = 1
+    let title: (Int) -> String
+    @Namespace private var namespace
+
+    private static let spring = Animation.spring(response: 0.3, dampingFraction: 0.8)
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(presets, id: \.self) { preset in
+                Button(action: {
+                    withAnimation(Self.spring) {
+                        custom.isSelected = false
+                        value = preset
+                    }
+                }) {
+                    label(title(preset), isSelected: !custom.isSelected && value == preset)
+                }
+                .buttonStyle(.plain)
+            }
+            if custom.isSelected {
+                stepper
+            } else {
+                Button(action: { withAnimation(Self.spring) { custom.isSelected = true } }) {
+                    label("Custom", isSelected: false)
+                }
+                .buttonStyle(.plain)
+                .help("Choose your own")
+            }
+        }
+        .padding(2)
+        .background(Capsule().fill(Color.white.opacity(0.08)))
+        .fixedSize()
+    }
+
+    private func label(_ text: String, isSelected: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+            .foregroundColor(isSelected ? .white : .secondary)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background {
+                if isSelected {
+                    Capsule().fill(Color.accentColor)
+                        .matchedGeometryEffect(id: "selection", in: namespace)
+                }
+            }
+            .contentShape(Capsule())
+    }
+
+    /// Steps by one unit up to `Constants.Stepper.step` units, then by that step
+    private var stepper: some View {
+        let step = Constants.Stepper.step
+        let units = custom.value / unit
+        let lower = customRange.lowerBound, upper = customRange.upperBound
+        return HStack(spacing: 2) {
+            stepButton("minus", label: "Shorter", enabled: custom.value > lower) {
+                custom.value = max(lower, (units - (units > step ? step : 1)) * unit)
+            }
+            Text(title(custom.value))
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundColor(.white)
+                .frame(minWidth: 30)
+            stepButton("plus", label: "Longer", enabled: custom.value < upper) {
+                custom.value = min(upper, (units + (units >= step ? step : 1)) * unit)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+        .background {
+            Capsule().fill(Color.accentColor)
+                .matchedGeometryEffect(id: "selection", in: namespace)
+        }
+    }
+
+    private func stepButton(_ symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(.white.opacity(enabled ? 0.9 : 0.35))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+        .help(label)
     }
 }
 

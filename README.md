@@ -56,7 +56,7 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 <summary><strong>Pomodoro</strong></summary>
 
 - A colorful card in the island: press **Start focusing**, then watch the countdown ring: tomato red while you focus, mint green on a break, grey while paused.
-- Focus for N minutes (20 by default), then break for 2, 5, 10 or 20 minutes. Changing the focus length keeps the time you've already focused.
+- Focus for 20, 25 or 50 minutes, then break for 2, 5 or 10, or pick **Custom** and set your own with − and +. Changing the focus length keeps the time you've already focused.
 - **Break now** starts a break early, **Snooze 5m** pushes the next one back, and **Back to focus** ends a break.
 - Two break styles: a **Notification** with Start break, Snooze and Skip actions, or a **Full screen** blurred overlay with a countdown. Press Esc to get back to focus; the screen is never locked.
 - Pauses while your Mac is locked or asleep and picks up where it stopped. A ☕ icon shows in the menu bar during a break.
@@ -78,6 +78,7 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 - Pick a station: **Study**, **Sleep**, **Focus** or **Jazz**. Each plays a current live stream, so it never goes stale.
 - Press 🔍 to search YouTube. Filter by **Live**, **Playlists** or **Long (1h+)**, choose with ↑↓ and press Return to play, or ⌘Return to also save it as a station. Your last 10 searches stay listed.
 - When a video or playlist ends with nothing after it, Nook plays a related video next, like YouTube's autoplay, and ⏩ does the same on a single video. Turn it off with **Autoplay Related Videos** in the station menu. Live stations don't autoplay.
+- **Resume when quiet**, in the Music tile or the station menu, starts the music again once your Mac has made no sound for 1 or 5 minutes, or a delay you choose, so pausing for a call or a video doesn't end it for the day. It plays the last station, or Study if you haven't played one, and waits while your Mac is locked or asleep. It's off by default.
 - Before you type, search shows **Recommended**: videos YouTube lists alongside the last few you played in Nook, leaving out ones you've already played or saved.
 - Save search results with **☆ Save**, or **Add from YouTube Link…**. **Recently Played** lists the last 15 stations.
 - Switching stations fades the old music out. If something can't play outside YouTube, Nook says so and goes back to what was playing.
