@@ -14,7 +14,7 @@
 Nook lives in your menu bar. Click its icon and a panel drops down from the notch, like the Dynamic Island, with a Pomodoro timer, a shutdown timer, background music, screen recording, your Bluetooth devices and your Mac's vitals. Click away or press Esc and it folds back up.
 
 <p align="center">
-  <img src="screenshots/utilities.png" width="720" alt="Nook's Utilities page: Pomodoro, Power Off, Music, Screen Recording and Bluetooth tiles">
+  <img src="screenshots/utilities.png" width="720" alt="Nook's island: the Pomodoro card counting down a focus sprint, the Music card playing a station with its artwork, and the Power Off, Screen Recording and Bluetooth tiles">
 </p>
 
 ## Install
@@ -34,12 +34,13 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 
 | | |
 |---|---|
-| ⏱️ **Pomodoro** | Focus sprints with a live countdown ring, then a break as a notification or a full-screen overlay. Pauses while your Mac is locked or asleep. |
+| ⏱️ **Pomodoro** | Focus sprints of 20, 25, 50 minutes or your own length, with a live countdown ring, then a break as a notification or a full-screen overlay. Pauses while your Mac is locked or asleep. |
 | ⏻ **Power Off** | Drag along a ruler to shut your Mac down in 5 minutes to 2 hours. Cancel in one click. |
-| 🎵 **Music** | Study, sleep, focus and jazz live streams from YouTube, playing in the background. Search YouTube or play your own playlists. |
+| 🎵 **Music** | Study, sleep, focus and jazz live streams from YouTube on a card with the video's artwork. Search YouTube, play your own playlists, autoplay related videos, and pick the music back up once your Mac goes quiet. |
 | ⏺️ **Screen Recording** | One screen, all screens or an area, with system audio and your microphone. Pause, resume and save as `.mov`. |
 | 📶 **Bluetooth** | Your paired devices with battery levels, including AirPods left, right and case. Connect or disconnect in one click. |
 | 📊 **System** | CPU, GPU, memory, battery, network, disk space and power draw at a glance. |
+| 🔐 **Permissions** | Every macOS permission Nook uses, whether it's allowed, and a button to allow it or open System Settings. |
 | ℹ️ **About & updates** | Your version, how Nook was installed, and one-click updates from GitHub. |
 
 <p align="center">
@@ -47,7 +48,7 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 </p>
 
 <p align="center">
-  <img src="screenshots/about.png" width="720" alt="Nook's About page: version 1.1.0, installed with Homebrew, up to date">
+  <img src="screenshots/about.png" width="720" alt="Nook's About page: version 1.5.0, a Check for Updates button, and links to GitHub, the release notes and Permissions">
 </p>
 
 ## Features in detail
@@ -56,6 +57,7 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 <summary><strong>Pomodoro</strong></summary>
 
 - A colorful card in the island: press **Start focusing**, then watch the countdown ring: tomato red while you focus, mint green on a break, grey while paused.
+- If macOS has notifications turned off for Nook, the tile says so, since Notification-style breaks would pass unseen, and **Permissions** takes you to the fix.
 - Focus for 20, 25 or 50 minutes, then break for 2, 5 or 10, or pick **Custom** and set your own with − and +. Changing the focus length keeps the time you've already focused.
 - **Break now** starts a break early, **Snooze 5m** pushes the next one back, and **Back to focus** ends a break.
 - Two break styles: a **Notification** with Start break, Snooze and Skip actions, or a **Full screen** blurred overlay with a countdown. Press Esc to get back to focus; the screen is never locked.
@@ -75,6 +77,7 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 <details>
 <summary><strong>Music</strong></summary>
 
+- The Music tile is a colored card with the artwork of what's playing, a ☆ to save it as a station, and the seek bar along its bottom.
 - Pick a station: **Study**, **Sleep**, **Focus** or **Jazz**. Each plays a current live stream, so it never goes stale.
 - Press 🔍 to search YouTube. Filter by **Live**, **Playlists** or **Long (1h+)**, choose with ↑↓ and press Return to play, or ⌘Return to also save it as a station. Your last 10 searches stay listed.
 - When a video or playlist ends with nothing after it, Nook plays a related video next, like YouTube's autoplay, and ⏩ does the same on a single video. Turn it off with **Autoplay Related Videos** in the station menu. Live stations don't autoplay.
@@ -128,9 +131,18 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 
 </details>
 
+<details>
+<summary><strong>Permissions</strong></summary>
+
+- Open it from **About › Permissions**, or from the **Permissions** button a tile shows when it's missing access.
+- Each permission shows **Allowed**, **Not allowed** or **Not asked yet**. **Allow** brings up the macOS prompt; **Settings** opens the right pane of System Settings.
+- The page re-reads every status every 2 seconds while it's open, so a change made in System Settings shows up on its own. Screen Recording is the exception: macOS applies it after you quit and reopen Nook.
+
+</details>
+
 ### Permissions
 
-macOS asks for each of these the first time Nook needs it:
+macOS asks for each of these the first time Nook needs it, and **About › Permissions** shows where each one stands:
 
 | Permission | Why |
 |---|---|
