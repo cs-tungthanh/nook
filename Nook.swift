@@ -166,6 +166,8 @@ private enum Constants {
         static let recentlyPlayedLimit = 15
         /// How far the rewind and forward buttons jump
         static let seekStepSeconds = 10.0
+        /// The thumbnail and play button on the Music tile
+        static let artworkSize: CGFloat = 76
         /// "Long" results: YouTube's own filter means over 20 minutes
         static let longMinimumSeconds = 3600
         /// A player this small starts at YouTube's lowest video quality, so it
@@ -4693,6 +4695,7 @@ struct ContentView: View {
     @State private var musicLink: String?
     @State private var musicLinkError: String?
     @State private var isAddingMusicLink = false
+    @State private var isHoveringArtwork = false
     @FocusState private var isSearchFieldFocused: Bool
 
     var body: some View {
@@ -5259,49 +5262,7 @@ struct ContentView: View {
 
     private var musicView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                sectionLabel("Music", systemImage: "music.note")
-                Spacer()
-                Button(action: { appDelegate.afterClosingIsland(music.openInBrowser) }) {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .frame(width: 24, height: 20)
-                }
-                .buttonStyle(CustomPlainButtonStyle())
-                .cornerRadius(5)
-                .disabled(music.videoID == nil)
-                .opacity(music.videoID == nil ? 0.35 : 1)
-                .accessibilityLabel("Open in YouTube")
-                Button(action: musicSearch.present) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .frame(width: 24, height: 20)
-                }
-                .buttonStyle(CustomPlainButtonStyle())
-                .cornerRadius(5)
-                .accessibilityLabel("Search YouTube")
-            }
-            .frame(minHeight: 20)
-
-            HStack(spacing: 8) {
-                stationMenu
-                Spacer(minLength: 4)
-                musicTransport
-            }
-
-            if musicLink != nil {
-                musicLinkField
-            } else if let notice = music.notice {
-                statusRow(icon: "exclamationmark.triangle", text: notice)
-            } else {
-                // Song titles can be long; one line keeps the tile from jumping
-                musicStatusRow
-                    .lineLimit(1)
-            }
-
-            MusicProgressRow(music: music, progress: music.progress)
+            musicCard
 
             HStack(spacing: 8) {
                 Image(systemName: "speaker.fill")
@@ -5316,6 +5277,74 @@ struct ContentView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
+    }
+
+
+    /// The player as a colored card, like Pomodoro's: it glows while music
+    /// plays and dims when it's paused or stopped
+    private var musicCard: some View {
+        let colors = music.isActive ? MusicTheme.playingColors : MusicTheme.restingColors
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Text("🎵")
+                Text("Music")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                Spacer()
+                musicCardIcon("arrow.up.forward.app", label: "Open in YouTube", enabled: music.videoID != nil) {
+                    appDelegate.afterClosingIsland(music.openInBrowser)
+                }
+                musicCardIcon("magnifyingglass", label: "Search YouTube", enabled: true, action: musicSearch.present)
+            }
+            .frame(minHeight: 20)
+
+            HStack(alignment: .center, spacing: 12) {
+                musicArtwork
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 2) {
+                        stationMenu
+                        Spacer(minLength: 4)
+                        musicButton("backward.fill", label: "Previous", enabled: music.canGoPrevious, action: music.previous)
+                        musicButton("forward.fill", label: "Next", enabled: music.canGoNext, action: music.next)
+                    }
+                    if let notice = music.notice {
+                        statusRow(icon: "exclamationmark.triangle", text: notice)
+                            .lineLimit(1)
+                    } else {
+                        // Song titles can be long; one line keeps the tile from jumping
+                        musicStatusRow
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            if musicLink != nil {
+                musicLinkField
+            }
+
+            MusicProgressRow(music: music, progress: music.progress)
+        }
+        .foregroundColor(.white)
+        // The seek bar and "Save" use the accent color, which blue on violet hides
+        .accentColor(.white)
+        .padding(14)
+        .background(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: colors[0].opacity(music.isActive ? 0.45 : 0.2), radius: 8, y: 3)
+        .animation(.easeInOut(duration: 0.3), value: music.isActive)
+    }
+
+    private func musicCardIcon(_ symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.white.opacity(0.18)))
+        }
+        .buttonStyle(PillButtonStyle())
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .accessibilityLabel(label)
+        .help(label)
     }
 
     /// A plain button opening an AppKit menu. SwiftUI's `Menu` is backed by a
@@ -5339,16 +5368,45 @@ struct ContentView: View {
         }
         .buttonStyle(CustomPlainButtonStyle())
         .cornerRadius(5)
-        .frame(width: 190, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var musicTransport: some View {
-        HStack(spacing: 2) {
-            musicButton("backward.fill", label: "Previous", enabled: music.canGoPrevious, action: music.previous)
-            musicButton(music.isActive ? "pause.fill" : "play.fill", label: music.isActive ? "Pause" : "Play",
-                        enabled: music.station != nil, action: music.togglePlayPause)
-            musicButton("forward.fill", label: "Next", enabled: music.canGoNext, action: music.next)
+    /// The video's thumbnail with a large play/pause button over it; the whole
+    /// square is one click target, so it's easy to hit without aiming
+    private var musicArtwork: some View {
+        let enabled = music.station != nil
+        let size = Constants.Music.artworkSize
+        return Button(action: music.togglePlayPause) {
+            ZStack {
+                if let id = music.videoID, let url = URL(string: "https://i.ytimg.com/vi/\(id)/mqdefault.jpg") {
+                    AsyncImage(url: url) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        Color.white.opacity(0.15)
+                    }
+                } else {
+                    Color.white.opacity(0.15)
+                }
+                Circle()
+                    .fill(Color.black.opacity(isHoveringArtwork ? 0.6 : 0.45))
+                    .frame(width: 42, height: 42)
+                Image(systemName: music.isActive ? "pause.fill" : "play.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(.white)
+                    // The triangle's weight sits left of its frame's center
+                    .offset(x: music.isActive ? 0 : 1.5)
+            }
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .scaleEffect(isHoveringArtwork && enabled ? 1.03 : 1)
+            .animation(.easeOut(duration: 0.12), value: isHoveringArtwork)
         }
+        .buttonStyle(.plain)
+        .onHover { isHoveringArtwork = $0 }
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
+        .accessibilityLabel(music.isActive ? "Pause" : "Play")
     }
 
     private func musicButton(_ symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
@@ -6162,6 +6220,9 @@ struct CustomPlainButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            // A clear background doesn't take clicks, so without this only the
+            // glyph itself was clickable until the hover highlight showed
+            .contentShape(Rectangle())
             .background(
                 Color.secondary.opacity(isHovered ? 0.1 : 0)
             )
@@ -6278,6 +6339,12 @@ struct PomodoroTheme {
     var gradient: LinearGradient {
         LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
     }
+}
+
+/// The Music card's colors: vivid while playing, muted while paused or stopped
+enum MusicTheme {
+    static let playingColors = [Color(red: 0.49, green: 0.30, blue: 0.95), Color(red: 0.93, green: 0.33, blue: 0.62)]
+    static let restingColors = [Color(red: 0.30, green: 0.26, blue: 0.48), Color(red: 0.45, green: 0.28, blue: 0.46)]
 }
 
 /// Brightens on hover and shrinks a little on press, for the Pomodoro card's pills.
