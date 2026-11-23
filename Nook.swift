@@ -151,6 +151,16 @@ private enum Constants {
         static let refreshDelay: TimeInterval = 1
     }
 
+    enum Permissions {
+        /// How often the Permissions page re-reads each status while it's on screen,
+        /// so a change made in System Settings shows up without reopening it
+        static let refreshInterval: TimeInterval = 2
+        static let microphoneSettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        static let automationSettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+        static let notificationsSettingsURL = "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        static let systemEventsBundleID = "com.apple.systemevents"
+    }
+
     enum System {
         /// How often the System page re-reads its stats while it's on screen
         static let sampleInterval: TimeInterval = 1.5
@@ -254,6 +264,38 @@ private enum Notifier {
             if let error = error {
                 NSLog("Nook: failed to post notification: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Shows the macOS prompt the first time a feature that notifies is used.
+    /// Until then, and after a "Don't Allow", posts are silently dropped.
+    /// `completion` runs on the main thread once the prompt is answered, or right
+    /// away when it was answered before.
+    static func requestAuthorizationIfNeeded(_ completion: (() -> Void)? = nil) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .notDetermined else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
+            center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                if let error = error {
+                    NSLog("Nook: notification authorization failed: \(error.localizedDescription)")
+                } else if !granted {
+                    NSLog("Nook: notifications not allowed")
+                }
+                DispatchQueue.main.async { completion?() }
+            }
+        }
+    }
+
+    /// Whether posts can be shown: false only once the user said no. "Not asked
+    /// yet" counts as allowed, since the prompt comes on first use.
+    /// Calls back on the main thread.
+    static func checkAllowed(_ completion: @escaping (Bool) -> Void) {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let allowed = settings.authorizationStatus != .denied
+            DispatchQueue.main.async { completion(allowed) }
         }
     }
 
@@ -385,7 +427,26 @@ final class Pomodoro: ObservableObject {
     }
 
     @Published var mode: BreakMode {
-        didSet { defaults.set(mode.rawValue, forKey: Constants.Pomodoro.Keys.mode) }
+        didSet {
+            defaults.set(mode.rawValue, forKey: Constants.Pomodoro.Keys.mode)
+            if mode == .notification {
+                Notifier.requestAuthorizationIfNeeded { [weak self] in self?.refreshNotificationPermission() }
+            }
+        }
+    }
+
+    /// Whether macOS shows Nook's notifications. Without them a Notification-style
+    /// break passes unseen, so the tile says what's missing. Assumed allowed until
+    /// read, so the tile doesn't flash a warning.
+    @Published private(set) var notificationsAllowed = true
+
+    /// Re-reads the notification permission; cheap, and done at the start of
+    /// every focus and whenever the island opens
+    func refreshNotificationPermission() {
+        Notifier.checkAllowed { [weak self] allowed in
+            guard let self = self, self.notificationsAllowed != allowed else { return }
+            self.notificationsAllowed = allowed
+        }
     }
 
     /// Called on every phase change so the menu bar can refresh.
@@ -480,6 +541,7 @@ final class Pomodoro: ObservableObject {
     private func startCycle() {
         heldPhase = nil
         guard isEnabled else { return }
+        refreshNotificationPermission()
         startTicking()
         guard pauseReasons.isEmpty else {
             phase = .paused
@@ -876,12 +938,6 @@ final class ScreenRecorder: NSObject, ObservableObject {
         guard confirmDiscard(keepTitle: "Keep") else { return }
         writer.cancel()
         reset()
-    }
-
-    func openPrivacySettings() {
-        if let url = URL(string: Constants.Recording.privacySettingsURL) {
-            NSWorkspace.shared.open(url)
-        }
     }
 
     // MARK: Displays
@@ -1649,6 +1705,8 @@ final class BluetoothManager: NSObject, ObservableObject {
         case loading
         case ready
         case poweredOff
+        /// macOS hasn't asked yet; `requestAccess()` shows the prompt
+        case notAsked
         case unauthorized
     }
 
@@ -1657,8 +1715,8 @@ final class BluetoothManager: NSObject, ObservableObject {
     @Published private(set) var busyDevices: Set<String> = []
     @Published private(set) var errorMessage: String?
 
-    /// Created on first use so the Bluetooth permission prompt only appears
-    /// once the user opens the island, not at launch
+    /// Created only once Bluetooth access is allowed or the user asks for it,
+    /// since creating it is what shows the permission prompt
     private var central: CBCentralManager?
     private var connectNotification: IOBluetoothUserNotification?
     private var disconnectNotifications: [String: IOBluetoothUserNotification] = [:]
@@ -1687,6 +1745,10 @@ final class BluetoothManager: NSObject, ObservableObject {
 
     func refresh() {
         guard let central = central else {
+            guard CBManager.authorization != .notDetermined else {
+                setUnavailable(.notAsked)
+                return
+            }
             // The delegate's state callback triggers the first real refresh
             self.central = CBCentralManager(delegate: self, queue: .main)
             return
@@ -1729,6 +1791,14 @@ final class BluetoothManager: NSObject, ObservableObject {
 
     // MARK: Actions
 
+    /// Shows the Bluetooth permission prompt; the island must be closed first
+    /// or it covers the prompt
+    func requestAccess() {
+        guard central == nil else { return }
+        availability = .loading
+        central = CBCentralManager(delegate: self, queue: .main)
+    }
+
     func toggleConnection(_ info: BluetoothDeviceInfo) {
         guard !busyDevices.contains(info.id), let device = IOBluetoothDevice(addressString: info.id) else { return }
         errorMessage = nil
@@ -1754,11 +1824,9 @@ final class BluetoothManager: NSObject, ObservableObject {
         }
     }
 
+    /// Bluetooth settings, for turning it on or pairing; permission lives on the Permissions page
     func openSettings() {
-        let url = availability == .unauthorized
-            ? Constants.Bluetooth.privacySettingsURL
-            : Constants.Bluetooth.settingsURL
-        if let url = URL(string: url) {
+        if let url = URL(string: Constants.Bluetooth.settingsURL) {
             NSWorkspace.shared.open(url)
         }
     }
@@ -1977,6 +2045,266 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         // Called from inside CoreBluetooth's own state update, so refresh after it returns
         scheduleRefresh()
+    }
+}
+
+// MARK: - Permissions
+
+/// Where one of Nook's macOS privacy permissions stands right now
+enum PermissionStatus: Equatable {
+    case granted
+    case denied
+    /// macOS hasn't asked yet; asking shows the system prompt
+    case notAsked
+    /// Can't be read without side effects (System Events isn't running)
+    case unknown
+
+    var label: String {
+        switch self {
+        case .granted: return "Allowed"
+        case .denied: return "Not allowed"
+        case .notAsked: return "Not asked yet"
+        case .unknown: return "Unknown"
+        }
+    }
+}
+
+enum PermissionKind: String, CaseIterable, Identifiable {
+    case screenRecording, microphone, bluetooth, notifications, automation
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .screenRecording: return "Screen & System Audio Recording"
+        case .microphone: return "Microphone"
+        case .bluetooth: return "Bluetooth"
+        case .notifications: return "Notifications"
+        case .automation: return "Automation › System Events"
+        }
+    }
+
+    var purpose: String {
+        switch self {
+        case .screenRecording: return "Record your screen and Mac sound"
+        case .microphone: return "Include your voice in recordings"
+        case .bluetooth: return "List and connect your devices"
+        case .notifications: return "Break, shutdown and update notices"
+        case .automation: return "Shut down at the scheduled time"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .screenRecording: return "record.circle"
+        case .microphone: return "mic"
+        case .bluetooth: return "dot.radiowaves.left.and.right"
+        case .notifications: return "bell"
+        case .automation: return "power"
+        }
+    }
+
+    var settingsURL: URL? {
+        switch self {
+        case .screenRecording: return URL(string: Constants.Recording.privacySettingsURL)
+        case .microphone: return URL(string: Constants.Permissions.microphoneSettingsURL)
+        case .bluetooth: return URL(string: Constants.Bluetooth.privacySettingsURL)
+        case .automation: return URL(string: Constants.Permissions.automationSettingsURL)
+        case .notifications:
+            let id = Bundle.main.bundleIdentifier.map { "?id=\($0)" } ?? ""
+            return URL(string: Constants.Permissions.notificationsSettingsURL + id)
+        }
+    }
+}
+
+/// Reads the status of every permission Nook uses, without triggering any
+/// prompt, and asks for one on request. Only polls while the page is shown.
+final class Permissions: ObservableObject {
+    @Published private(set) var statuses: [PermissionKind: PermissionStatus] = [:]
+
+    private var timer: Timer?
+    /// Created only to ask for Bluetooth; creating it is what shows the prompt
+    private var bluetoothCentral: CBCentralManager?
+    private let automationQueue = DispatchQueue(label: "com.nook.permissions.automation")
+
+    var isIslandShown = false { didSet { updateTimer() } }
+    var isPageShown = false { didSet { updateTimer() } }
+
+    private func updateTimer() {
+        let shouldRun = isIslandShown && isPageShown
+        guard shouldRun != (timer != nil) else { return }
+        timer?.invalidate()
+        timer = nil
+        guard shouldRun else { return }
+        refresh()
+        let timer = Timer(timeInterval: Constants.Permissions.refreshInterval, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func status(of kind: PermissionKind) -> PermissionStatus {
+        statuses[kind] ?? .unknown
+    }
+
+    func refresh() {
+        // Preflight can't tell "denied" from "never asked"; both read as not allowed
+        set(.screenRecording, CGPreflightScreenCaptureAccess() ? .granted : .denied)
+        set(.microphone, Self.status(AVCaptureDevice.authorizationStatus(for: .audio)))
+        set(.bluetooth, Self.status(CBManager.authorization))
+
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            let status: PermissionStatus
+            switch settings.authorizationStatus {
+            case .authorized, .provisional: status = .granted
+            case .denied: status = .denied
+            case .notDetermined: status = .notAsked
+            @unknown default: status = .unknown
+            }
+            DispatchQueue.main.async { self?.set(.notifications, status) }
+        }
+
+        checkAutomation { _ in }
+    }
+
+    /// Reads whether Nook may control System Events, without prompting.
+    /// Calls back on the main thread.
+    func checkAutomation(_ completion: @escaping (PermissionStatus) -> Void) {
+        // AEDeterminePermissionToAutomateTarget can block, so it stays off the main thread
+        automationQueue.async { [weak self] in
+            let status = Self.automationStatus(askingIfNeeded: false)
+            DispatchQueue.main.async {
+                self?.set(.automation, status)
+                completion(status)
+            }
+        }
+    }
+
+    /// Like `checkAutomation`, but launches System Events first when it isn't
+    /// running, so the answer is `.unknown` only if it can't be launched.
+    /// Never prompts. Calls back on the main thread.
+    func checkAutomationLaunchingIfNeeded(_ completion: @escaping (PermissionStatus) -> Void) {
+        checkAutomation { [weak self] status in
+            guard status == .unknown, let self = self else {
+                completion(status)
+                return
+            }
+            self.launchSystemEvents { self.checkAutomation(completion) }
+        }
+    }
+
+    /// Asks to control System Events, showing the macOS prompt if it hasn't
+    /// been answered yet. Calls back on the main thread with the result.
+    func askAutomation(_ completion: @escaping (PermissionStatus) -> Void) {
+        launchSystemEvents { [weak self] in
+            self?.automationQueue.async {
+                let status = Self.automationStatus(askingIfNeeded: true)
+                DispatchQueue.main.async {
+                    self?.set(.automation, status)
+                    completion(status)
+                }
+            }
+        }
+    }
+
+    /// The target must be running for its permission to be read or asked for;
+    /// System Events is a faceless helper, so launching it shows nothing.
+    /// `then` runs once it's up (or launching failed), on any thread.
+    private func launchSystemEvents(_ then: @escaping () -> Void) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Constants.Permissions.systemEventsBundleID) else {
+            then()
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in then() }
+    }
+
+    /// Whether `request(kind)` only re-reads the status in place, showing no
+    /// prompt or System Settings, so the island can stay open to show it
+    func isCheck(_ kind: PermissionKind) -> Bool {
+        kind == .automation && status(of: kind) == .unknown
+    }
+
+    /// Shows the system prompt when macOS hasn't asked yet, otherwise opens
+    /// the matching pane in System Settings (macOS asks only once). An
+    /// Automation status that can't be read (see `isCheck`) is read again instead.
+    func request(_ kind: PermissionKind) {
+        if isCheck(kind) {
+            // Starts System Events and reads again; "Not asked yet" then offers Allow
+            checkAutomationLaunchingIfNeeded { _ in }
+            return
+        }
+        if kind == .screenRecording {
+            // macOS lists an app under Screen Recording only once it has asked,
+            // and preflight can't tell "never asked" from "denied". Asking adds
+            // Nook to the list (with a prompt the first time, otherwise nothing),
+            // so Settings always has a switch to turn on.
+            if status(of: kind) != .granted { CGRequestScreenCaptureAccess() }
+            openSettings(for: kind)
+            return
+        }
+        guard status(of: kind) == .notAsked else {
+            openSettings(for: kind)
+            return
+        }
+        switch kind {
+        case .screenRecording:
+            break // handled above
+        case .microphone:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+                DispatchQueue.main.async { self?.refresh() }
+            }
+        case .bluetooth:
+            bluetoothCentral = CBCentralManager(delegate: nil, queue: .main)
+        case .notifications:
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.refresh() }
+            }
+        case .automation:
+            askAutomation { _ in }
+        }
+    }
+
+    func openSettings(for kind: PermissionKind) {
+        if let url = kind.settingsURL {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func set(_ kind: PermissionKind, _ status: PermissionStatus) {
+        if statuses[kind] != status { statuses[kind] = status }
+    }
+
+    private static func status(_ status: AVAuthorizationStatus) -> PermissionStatus {
+        switch status {
+        case .authorized: return .granted
+        case .denied, .restricted: return .denied
+        case .notDetermined: return .notAsked
+        @unknown default: return .unknown
+        }
+    }
+
+    private static func status(_ authorization: CBManagerAuthorization) -> PermissionStatus {
+        switch authorization {
+        case .allowedAlways: return .granted
+        case .denied, .restricted: return .denied
+        case .notDetermined: return .notAsked
+        @unknown default: return .unknown
+        }
+    }
+
+    private static func automationStatus(askingIfNeeded: Bool) -> PermissionStatus {
+        let target = NSAppleEventDescriptor(bundleIdentifier: Constants.Permissions.systemEventsBundleID)
+        guard let desc = target.aeDesc else { return .unknown }
+        let result = AEDeterminePermissionToAutomateTarget(desc, typeWildCard, typeWildCard, askingIfNeeded)
+        switch result {
+        case noErr: return .granted
+        case OSStatus(errAEEventNotPermitted): return .denied
+        case OSStatus(errAEEventWouldRequireUserConsent): return .notAsked
+        default: return .unknown // procNotFound: System Events isn't running
+        }
     }
 }
 
@@ -2354,7 +2682,7 @@ enum MusicError: LocalizedError {
         case .emptyPlaylist: return "This playlist has no videos"
         case .keychain(let status):
             let reason = SecCopyErrorMessageString(status, nil) as String? ?? "error \(status)"
-            return "Couldn't save the sign-in to the keychain: \(reason)"
+            return "Couldn't access the YouTube sign-in in the keychain: \(reason)"
         case .player(let code):
             switch code {
             case 100: return "This video is private or was removed"
@@ -2607,7 +2935,10 @@ private enum YouTube {
 /// Needs Nook's Google OAuth client ID ("iOS" type, bundle ID com.nook.app),
 /// which build.sh stamps into Info.plist from `NOOK_YOUTUBE_CLIENT_ID`.
 final class YouTubeAccount: NSObject, ObservableObject {
-    @Published private(set) var isSignedIn: Bool
+    /// Remembered in UserDefaults, so launch doesn't wait on the keychain to know it
+    @Published private(set) var isSignedIn: Bool {
+        didSet { UserDefaults.standard.set(isSignedIn, forKey: Keys.signedIn) }
+    }
     /// Liked videos first, then your playlists as YouTube orders them
     @Published private(set) var playlists: [MusicStation] = []
 
@@ -2629,6 +2960,7 @@ final class YouTubeAccount: NSObject, ObservableObject {
 
     private enum Keys {
         static let refreshToken = "youtube.refreshToken"
+        static let signedIn = "youtube.signedIn"
     }
     private static let scope = "https://www.googleapis.com/auth/youtube.readonly"
     private static let api = "https://www.googleapis.com/youtube/v3/"
@@ -2636,8 +2968,22 @@ final class YouTubeAccount: NSObject, ObservableObject {
     private static let maxVideos = 200
 
     override init() {
-        isSignedIn = Keychain.read(Keys.refreshToken) != nil
+        let stored = UserDefaults.standard.object(forKey: Keys.signedIn) as? Bool
+        isSignedIn = stored ?? false
         super.init()
+        guard stored == nil else { return }
+        // Versions before the flag only kept the keychain item: check it once,
+        // off the main thread, and remember the answer from then on. A failed
+        // read stores nothing, so the next launch checks again.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let hasToken: Bool
+            switch Keychain.lookup(Keys.refreshToken) {
+            case .found: hasToken = true
+            case .missing: hasToken = false
+            case .failed: return
+            }
+            DispatchQueue.main.async { self?.isSignedIn = hasToken }
+        }
     }
 
     // MARK: Signing in
@@ -2732,8 +3078,18 @@ final class YouTubeAccount: NSObject, ObservableObject {
     private func validAccessToken() async throws -> String {
         if let token = accessToken, accessTokenExpiry.timeIntervalSinceNow > 60 { return token }
         if let refresh = tokenRefresh { return try await refresh.value }
-        guard let clientID = clientID, let refreshToken = Keychain.read(Keys.refreshToken) else {
+        guard let clientID = clientID else { throw MusicError.signIn }
+        let refreshToken: String
+        switch Keychain.lookup(Keys.refreshToken) {
+        case .found(let token):
+            refreshToken = token
+        case .missing:
+            // The flag said signed in but the token is gone (removed in Keychain Access)
+            isSignedIn = false
             throw MusicError.signIn
+        case .failed(let status):
+            // Still signed in: the token may be there, just unreadable this time
+            throw MusicError.keychain(status)
         }
         let refresh = Task { @MainActor () throws -> String in
             defer { tokenRefresh = nil }
@@ -2914,7 +3270,15 @@ private extension Data {
 private enum Keychain {
     private static let service = "com.nook.app"
 
-    static func read(_ account: String) -> String? {
+    /// What a read found. `failed` means the item may still be there, e.g. the
+    /// user denied the access prompt a newly signed build can show
+    enum Lookup {
+        case found(String)
+        case missing
+        case failed(OSStatus)
+    }
+
+    static func lookup(_ account: String) -> Lookup {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -2922,9 +3286,16 @@ private enum Keychain {
             kSecReturnData as String: true
         ]
         var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return .missing }
+        guard status == errSecSuccess, let data = result as? Data,
+              let value = String(data: data, encoding: .utf8) else { return .failed(status) }
+        return .found(value)
+    }
+
+    static func read(_ account: String) -> String? {
+        if case .found(let value) = lookup(account) { return value }
+        return nil
     }
 
     static func write(_ value: String, for account: String) throws {
@@ -3805,6 +4176,7 @@ final class QuietResume: ObservableObject {
     @Published var minutes: Int {
         didSet {
             defaults.set(minutes, forKey: Constants.Music.Keys.resumeWhenQuiet)
+            updateWatching()
             evaluate()
         }
     }
@@ -3840,12 +4212,39 @@ final class QuietResume: ObservableObject {
         minutes = stored
         custom = .load(forKey: Constants.Music.Keys.resumeWhenQuietCustom, current: stored,
                        presets: Constants.Music.resumeWhenQuietChoices, defaultValue: 15)
-        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                            &defaultDeviceAddress, .main, deviceListener)
-        attachToDefaultDevice()
-        observeAway()
-        statusSubscription = music.$status.dropFirst().receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.evaluate() }
+        updateWatching()
+    }
+
+    /// Whether the audio listeners and away observers are installed
+    private var isWatching = false
+
+    /// Listens for audio, sleep and lock changes only while the feature is on,
+    /// so leaving it off costs nothing
+    private func updateWatching() {
+        let shouldWatch = minutes > 0
+        guard shouldWatch != isWatching else { return }
+        isWatching = shouldWatch
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        if shouldWatch {
+            AudioObjectAddPropertyListenerBlock(system, &defaultDeviceAddress, .main, deviceListener)
+            attachToDefaultDevice()
+            observeAway()
+            statusSubscription = music.$status.dropFirst().receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.evaluate() }
+        } else {
+            AudioObjectRemovePropertyListenerBlock(system, &defaultDeviceAddress, .main, deviceListener)
+            if device != 0 {
+                AudioObjectRemovePropertyListenerBlock(device, &runningAddress, .main, runningListener)
+                device = 0
+            }
+            for (center, token) in observers { center.removeObserver(token) }
+            observers = []
+            // Nothing tracks sleep or lock while off; turning it back on starts fresh
+            awayReasons = []
+            statusSubscription = nil
+            timer?.invalidate()
+            timer = nil
+        }
     }
 
     /// Starts the countdown when everything is quiet, and stops it when anything isn't
@@ -4013,11 +4412,20 @@ final class Updater: ObservableObject {
         }
     }
 
+    /// Asks for notification permission first if nothing has yet, since a post
+    /// made before that is dropped. The version is marked notified only once a
+    /// post can show, so a "Don't Allow" later turned on still gets the notice.
     private func notifyOnce(about release: Release) {
         guard defaults.string(forKey: Constants.Update.Keys.notifiedVersion) != release.version else { return }
-        defaults.set(release.version, forKey: Constants.Update.Keys.notifiedVersion)
-        Notifier.post(title: "Nook \(release.version) is available",
-                      body: "Open Nook › About to update. You have \(currentVersion).")
+        Notifier.requestAuthorizationIfNeeded { [weak self] in
+            Notifier.checkAllowed { allowed in
+                guard let self = self, allowed,
+                      self.defaults.string(forKey: Constants.Update.Keys.notifiedVersion) != release.version else { return }
+                self.defaults.set(release.version, forKey: Constants.Update.Keys.notifiedVersion)
+                Notifier.post(title: "Nook \(release.version) is available",
+                              body: "Open Nook › About to update. You have \(self.currentVersion).")
+            }
+        }
     }
 
     private static func fetchLatestRelease() async throws -> Release {
@@ -4062,7 +4470,8 @@ final class Updater: ObservableObject {
             return
         }
         state = .downloading(release)
-        // `download` is nonisolated, so hashing and unzipping run off the main thread
+        // Hashing runs in a detached task and the tools are awaited, so no
+        // thread (main or otherwise) sits blocked while the update unpacks
         Task { @MainActor in
             do {
                 let app = try await Self.download(release)
@@ -4078,16 +4487,18 @@ final class Updater: ObservableObject {
         let (zip, response) = try await URLSession.shared.download(from: release.zipURL)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw UpdateError.download }
 
-        let data = try Data(contentsOf: zip, options: .mappedIfSafe)
         if let expected = release.sha256 {
-            let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            let actual = try await Task.detached(priority: .utility) {
+                let data = try Data(contentsOf: zip, options: .mappedIfSafe)
+                return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            }.value
             guard actual == expected.lowercased() else { throw UpdateError.checksum }
         }
 
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("NookUpdate-\(release.version)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try run("/usr/bin/ditto", ["-x", "-k", zip.path, folder.path])
+        try await run("/usr/bin/ditto", ["-x", "-k", zip.path, folder.path])
 
         let app = folder.appendingPathComponent("Nook.app")
         let info = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
@@ -4095,7 +4506,7 @@ final class Updater: ObservableObject {
               info?["CFBundleShortVersionString"] as? String == release.version else {
             throw UpdateError.wrongApp
         }
-        try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
+        try await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
         return app
     }
 
@@ -4173,15 +4584,28 @@ final class Updater: ObservableObject {
 
     // MARK: Helpers
 
-    private static func run(_ tool: String, _ arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: tool)
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw UpdateError.tool(URL(fileURLWithPath: tool).lastPathComponent) }
+    /// Runs a tool and resumes once it exits, without blocking a thread to wait
+    private static func run(_ tool: String, _ arguments: [String]) async throws {
+        let name = URL(fileURLWithPath: tool).lastPathComponent
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: tool)
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { process in
+                if process.terminationStatus == 0 {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: UpdateError.tool(name))
+                }
+            }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
     }
 
     private static func message(for error: Error) -> String {
@@ -4225,6 +4649,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var island: IslandController!
     var timer: Timer?
     @Published var shutdownDate: Date?
+    /// The last Start couldn't schedule a shutdown: Nook may not control System Events
+    @Published var shutdownNeedsPermission = false
     var highlightView: NSView?
     private var outsideClickMonitor: Any?
     private var escapeMonitor: Any?
@@ -4235,6 +4661,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let screenRecorder = ScreenRecorder()
     let bluetooth = BluetoothManager()
     let systemMonitor = SystemMonitor()
+    let permissions = Permissions()
     let music = MusicPlayer()
     let youTubeAccount = YouTubeAccount()
     let updater = Updater()
@@ -4242,7 +4669,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     lazy var quietResume = QuietResume(music: music)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        requestNotificationPermissions()
+        setUpNotifications()
         setupStatusBar()
         setupIsland()
         pomodoro.onChange = { [weak self] in
@@ -4257,7 +4684,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         music.account = youTubeAccount
         _ = quietResume
-        Task { await youTubeAccount.refreshPlaylists() }
         updater.start()
     }
 
@@ -4275,6 +4701,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func startRecording() {
         // Close the island so it isn't in the way of what's being recorded
         closeIsland()
+        // For the "Recording saved" notification
+        Notifier.requestAuthorizationIfNeeded()
         screenRecorder.start()
     }
 
@@ -4347,16 +4775,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         )
     }
 
-    private func requestNotificationPermissions() {
+    /// Permission is asked for on first use (see `Notifier.requestAuthorizationIfNeeded`),
+    /// so a new install shows no prompt at launch
+    private func setUpNotifications() {
         UNUserNotificationCenter.current().delegate = self
         Notifier.registerPomodoroCategory()
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error = error {
-                NSLog("Nook: notification authorization failed: \(error.localizedDescription)")
-            } else if !granted {
-                NSLog("Nook: notifications not allowed — enable them in System Settings › Notifications")
-            }
-        }
     }
 
     private func setupStatusBar() {
@@ -4538,7 +4961,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func setupIsland() {
-        island = IslandController(content: ContentView(appDelegate: self, pomodoro: pomodoro, screenRecorder: screenRecorder, bluetooth: bluetooth, system: systemMonitor, music: music, musicSearch: musicSearch, quietResume: quietResume, updater: updater))
+        island = IslandController(content: ContentView(appDelegate: self, pomodoro: pomodoro, screenRecorder: screenRecorder, bluetooth: bluetooth, system: systemMonitor, music: music, musicSearch: musicSearch, quietResume: quietResume, updater: updater, permissions: permissions))
         island.onDismiss = { [weak self] in
             self?.closeIsland()
         }
@@ -4554,7 +4977,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // island to take key presses (Esc closes it)
         NSApp.activate(ignoringOtherApps: true)
         island.show(on: screen)
+        pomodoro.refreshNotificationPermission()
         systemMonitor.isIslandShown = true
+        permissions.isIslandShown = true
         addHighlight()
         startOutsideClickMonitor()
         startEscapeMonitor()
@@ -4563,6 +4988,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.bluetooth.refresh()
         }
+        // Read here rather than at launch, so a signed-in account costs nothing
+        // until the island (and its Music tile) is first opened. Throttled to
+        // once a minute, and the playlists menu refreshes again when it opens.
+        Task { [weak self] in await self?.youTubeAccount.refreshPlaylists() }
     }
 
     /// Closes the island, then runs `action` once it has folded away. The
@@ -4582,6 +5011,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         musicSearch.dismiss()
         island.hide()
         systemMonitor.isIslandShown = false
+        permissions.isIslandShown = false
         removeHighlight()
         stopOutsideClickMonitor()
         stopEscapeMonitor()
@@ -4670,7 +5100,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         highlightView = nil
     }
 
+    /// Schedules a shutdown once Nook may control System Events, asking for that
+    /// now rather than when the shutdown runs (when nobody may be there to answer)
+    func requestShutdown(inMinutes minutes: Int) {
+        shutdownNeedsPermission = false
+        // Notifications are settled first, so the "Shutdown Scheduled" post
+        // isn't dropped and the two macOS prompts never show at once
+        Notifier.requestAuthorizationIfNeeded { [weak self] in
+            self?.requestAutomationThenSchedule(inMinutes: minutes)
+        }
+    }
+
+    private func requestAutomationThenSchedule(inMinutes minutes: Int) {
+        let schedule = { [weak self] (status: PermissionStatus) in
+            guard let self = self else { return }
+            if status == .granted {
+                // Counted from now, so time spent on the prompt isn't lost
+                self.scheduleShutdown(at: Date().addingTimeInterval(TimeInterval(minutes * Constants.Time.secondsPerMinute)))
+            } else {
+                self.shutdownNeedsPermission = true
+            }
+        }
+        // Launches System Events if needed, so a permission granted earlier is
+        // read without closing the island
+        permissions.checkAutomationLaunchingIfNeeded { [weak self] status in
+            switch status {
+            case .granted, .denied, .unknown:
+                // `.unknown`: System Events couldn't be launched, so asking would fail too
+                schedule(status)
+            case .notAsked:
+                // The island floats above the prompt, so it closes first
+                self?.afterClosingIsland {
+                    self?.permissions.askAutomation(schedule)
+                }
+            }
+        }
+    }
+
     func scheduleShutdown(at date: Date) {
+        shutdownNeedsPermission = false
         shutdownDate = date
         cancelExistingTimers()
         startShutdownTimer(for: date)
@@ -4702,15 +5170,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     @objc func executeShutdown() {
-        let script = """
-        tell application "System Events"
-            shut down
-        end tell
-        """
-
-        var error: NSDictionary?
-        NSAppleScript(source: script)?.executeAndReturnError(&error)
-
         // The schedule is spent either way. If the Mac is still running (an
         // app refused to quit, or Automation permission was denied), the
         // countdown and menu bar icon must not linger past their time.
@@ -4719,14 +5178,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         shutdownDate = nil
         updateStatusItem()
 
-        if let error = error {
-            let message = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
-            NSLog("Nook: shutdown failed: \(message)")
-            showNotification(
-                title: "Couldn't Shut Down",
-                body: "\(message) Check that Nook may control System Events in System Settings › Privacy & Security › Automation."
-            )
+        // Shutting down waits for every app to agree to quit, which can take
+        // minutes. NSAppleScript only works on the main thread, so the script
+        // runs in osascript instead and the island stays responsive meanwhile.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", "tell application \"System Events\" to shut down"]
+        let errors = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errors
+        process.terminationHandler = { [weak self] process in
+            let output = errors.fileHandleForReading.readDataToEndOfFile()
+            guard process.terminationStatus != 0 else { return }
+            let message = String(data: output, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            DispatchQueue.main.async {
+                self?.reportShutdownFailure(message.isEmpty ? "Unknown error." : message)
+            }
         }
+        do {
+            try process.run()
+        } catch {
+            reportShutdownFailure(error.localizedDescription)
+        }
+    }
+
+    private func reportShutdownFailure(_ message: String) {
+        NSLog("Nook: shutdown failed: \(message)")
+        showNotification(
+            title: "Couldn't Shut Down",
+            body: "\(message) Check that Nook may control System Events in System Settings › Privacy & Security › Automation."
+        )
     }
 
     func updateStatusItem() {
@@ -4894,12 +5376,13 @@ struct ContentView: View {
     @ObservedObject var musicSearch: MusicSearch
     @ObservedObject var quietResume: QuietResume
     @ObservedObject var updater: Updater
+    @ObservedObject var permissions: Permissions
     @State private var shutdownMinutes = Constants.Shutdown.defaultMinutes
     @State private var showsAllDevices = false
     @State private var page: Page = .utilities
 
     private enum Page {
-        case utilities, system, about
+        case utilities, system, about, permissions
     }
 
     private var showsSystem: Bool { page == .system }
@@ -4917,6 +5400,8 @@ struct ContentView: View {
                 systemView
             } else if page == .about {
                 tile(aboutView)
+            } else if page == .permissions {
+                tile(permissionsView)
             } else if musicSearch.isPresented {
                 tile(musicSearchView)
             } else {
@@ -4957,7 +5442,7 @@ struct ContentView: View {
                         .renderingMode(.template)
                         .resizable()
                         .frame(width: 20, height: 20)
-                    Text(page == .system ? "System" : page == .about ? "About Nook" : "Nook")
+                    Text(page == .system ? "System" : page == .about ? "About Nook" : page == .permissions ? "Permissions" : "Nook")
                         .font(.headline)
                 }
                 .contentShape(Rectangle())
@@ -5055,6 +5540,17 @@ struct ContentView: View {
                         .minimumScaleFactor(0.7)
                 }
 
+                // Hidden once Automation reads as allowed (e.g. after the
+                // Permissions page), without waiting for the next Start
+                if appDelegate.shutdownNeedsPermission && permissions.status(of: .automation) != .granted {
+                    statusRow(
+                        icon: "exclamationmark.triangle",
+                        text: "Nook needs Automation access to shut down",
+                        actionTitle: "Permissions",
+                        action: { setPage(.permissions) }
+                    )
+                }
+
                 TimelineView(.periodic(from: .now, by: Constants.Time.updateInterval)) { _ in
                     statusRow(
                         icon: "clock",
@@ -5106,6 +5602,15 @@ struct ContentView: View {
                     mode.title
                 }
             }
+
+            if pomodoro.mode == .notification && !pomodoro.notificationsAllowed {
+                statusRow(
+                    icon: "bell.slash",
+                    text: "Notifications are off, so break reminders won't show",
+                    actionTitle: "Permissions",
+                    action: { setPage(.permissions) }
+                )
+            }
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
@@ -5154,6 +5659,11 @@ struct ContentView: View {
                     .opacity(0.85)
             }
             pomodoroPill("Start focusing", systemImage: "play.fill", theme: theme, prominent: true) {
+                // Re-read once answered, so a "Don't Allow" shows the warning
+                // right away (startCycle's read runs before the answer)
+                Notifier.requestAuthorizationIfNeeded { [weak pomodoro] in
+                    pomodoro?.refreshNotificationPermission()
+                }
                 pomodoro.isEnabled = true
             }
         }
@@ -5332,8 +5842,8 @@ struct ContentView: View {
                 statusRow(
                     icon: "exclamationmark.triangle",
                     text: error,
-                    actionTitle: screenRecorder.needsPrivacySettings ? "Settings" : "Retry",
-                    action: screenRecorder.needsPrivacySettings ? screenRecorder.openPrivacySettings : appDelegate.startRecording
+                    actionTitle: screenRecorder.needsPrivacySettings ? "Permissions" : "Retry",
+                    action: screenRecorder.needsPrivacySettings ? { setPage(.permissions) } : appDelegate.startRecording
                 )
             } else {
                 statusRow(
@@ -5376,12 +5886,19 @@ struct ContentView: View {
             switch bluetooth.availability {
             case .loading:
                 statusRow(icon: "hourglass", text: "Looking for devices…")
+            case .notAsked:
+                statusRow(
+                    icon: "lock",
+                    text: "Allow Bluetooth to list your devices",
+                    actionTitle: "Allow",
+                    action: { appDelegate.afterClosingIsland(bluetooth.requestAccess) }
+                )
             case .unauthorized:
                 statusRow(
                     icon: "exclamationmark.triangle",
-                    text: "Allow Nook under Bluetooth in Privacy settings",
-                    actionTitle: "Settings",
-                    action: bluetooth.openSettings
+                    text: "Nook isn't allowed to use Bluetooth",
+                    actionTitle: "Permissions",
+                    action: { setPage(.permissions) }
                 )
             case .poweredOff:
                 statusRow(icon: "slash.circle", text: "Bluetooth is off", actionTitle: "Settings", action: bluetooth.openSettings)
@@ -5969,12 +6486,95 @@ struct ContentView: View {
     private func setPage(_ newPage: Page) {
         page = newPage
         system.isPageShown = newPage == .system
+        permissions.isPageShown = newPage == .permissions
     }
 
     /// The default view: the Utilities tiles, with music search closed
     private func showHome() {
         if musicSearch.isPresented { musicSearch.dismiss() }
         if page != .utilities { setPage(.utilities) }
+    }
+
+    // MARK: Permissions
+
+    private var permissionsView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("What Nook may use on this Mac. Changes made in System Settings show up here within a few seconds.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(PermissionKind.allCases) { kind in
+                permissionRow(kind)
+            }
+            if permissions.status(of: .screenRecording) != .granted {
+                Text("Just allowed Screen Recording? macOS shows the change after you quit and reopen Nook.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+    }
+
+    private func permissionRow(_ kind: PermissionKind) -> some View {
+        let status = permissions.status(of: kind)
+        let (symbol, color): (String, Color) = {
+            switch status {
+            case .granted: return ("checkmark.circle.fill", .green)
+            case .denied: return ("xmark.circle.fill", .red)
+            case .notAsked: return ("questionmark.circle.fill", .orange)
+            case .unknown: return ("circle.dashed", .secondary)
+            }
+        }()
+        // Allowed rows keep Settings too, so access can be turned off again
+        let actionTitle: String = {
+            switch status {
+            case .granted: return "Settings"
+            case .notAsked: return kind == .screenRecording ? "Settings" : "Allow"
+            case .unknown: return permissions.isCheck(kind) ? "Check" : "Settings"
+            case .denied: return "Settings"
+            }
+        }()
+        return HStack(spacing: 10) {
+            Image(systemName: kind.systemImage)
+                .frame(width: 18)
+                .foregroundColor(.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(kind.title)
+                    .font(.caption.weight(.semibold))
+                Text(kind.purpose)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            HStack(spacing: 4) {
+                Image(systemName: symbol)
+                    .foregroundColor(color)
+                Text(status.label)
+                    .foregroundColor(.secondary)
+            }
+            .font(.caption)
+            // A prompt or System Settings would sit under the island, so it
+            // closes first; a Check stays open to show the new status
+            Button(action: {
+                if permissions.isCheck(kind) {
+                    permissions.request(kind)
+                } else {
+                    appDelegate.afterClosingIsland { permissions.request(kind) }
+                }
+            }) {
+                Text(actionTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+            }
+            .buttonStyle(CustomPlainButtonStyle())
+            .cornerRadius(5)
+        }
+        .padding(8)
+        .background(Color.white.opacity(0.08))
+        .cornerRadius(8)
     }
 
     // MARK: About
@@ -6004,6 +6604,12 @@ struct ContentView: View {
             HStack(spacing: 14) {
                 linkButton("GitHub", systemImage: "chevron.left.forwardslash.chevron.right", url: Constants.Update.projectPage)
                 linkButton("Release notes", systemImage: "doc.text", url: Constants.Update.releasesPage)
+                Button(action: { setPage(.permissions) }) {
+                    Label("Permissions", systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
                 Spacer()
                 if let checked = updater.lastChecked {
                     Text("Checked \(checked.formatted(.relative(presentation: .named)))")
@@ -6264,8 +6870,7 @@ struct ContentView: View {
     }
 
     private func scheduleShutdown(minutes: Int) {
-        let shutdownDate = Date().addingTimeInterval(TimeInterval(minutes * Constants.Time.secondsPerMinute))
-        appDelegate.scheduleShutdown(at: shutdownDate)
+        appDelegate.requestShutdown(inMinutes: minutes)
     }
 }
 

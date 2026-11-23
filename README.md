@@ -69,6 +69,7 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 <summary><strong>Power Off</strong></summary>
 
 - Click or drag along the ruler to pick 5 minutes to 2 hours in 5-minute steps, then press **Start**.
+- Shutting down needs Nook to control System Events (Automation). The first **Start** asks for it, closing the island so the macOS prompt shows; without it nothing is scheduled, and the tile says so with a **Permissions** button.
 - A live countdown in the island and a power icon in the menu bar while a shutdown is scheduled. Cancel with one click.
 - You get a notification when a shutdown is scheduled or cancelled, and if macOS refuses to shut down, Nook tells you why.
 
@@ -136,6 +137,8 @@ Nook needs an Apple silicon Mac with macOS 13 or later; screen recording needs m
 
 - Open it from **About › Permissions**, or from the **Permissions** button a tile shows when it's missing access.
 - Each permission shows **Allowed**, **Not allowed** or **Not asked yet**. **Allow** brings up the macOS prompt; **Settings** opens the right pane of System Settings.
+- Screen Recording shows only **Allowed** or **Not allowed**, since macOS doesn't say whether it has asked. Its **Settings** also adds Nook to the list there, which can bring up the macOS prompt the first time.
+- Automation shows **Unknown** when System Events isn't running, since macOS can only answer for a running app. **Check** starts it and reads the status again.
 - The page re-reads every status every 2 seconds while it's open, so a change made in System Settings shows up on its own. Screen Recording is the exception: macOS applies it after you quit and reopen Nook.
 
 </details>
