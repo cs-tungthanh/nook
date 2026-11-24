@@ -252,14 +252,11 @@ Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Scree
 
 </details>
 
-## Roadmap
 
-- [x] Pomodoro, Power Off, Music, Screen Recording, Bluetooth and System
-- [x] Homebrew releases and in-app updates
-- [ ] Bring the cleanup tools into the app
-- [ ] Configurable preferences
-- [ ] More utilities over time
+Ideas and contributions are welcome: [open an issue](https://github.com/cs-tungthanh/nook/issues).
 
-Ideas and contributions are welcome: [open an issue](https://github.com/cs-tungthanh/nook/issues). The license hasn't been decided yet.
+## License
+
+Nook is released under the [MIT License](LICENSE).
 
 <p align="center"><sub>Made for the little things that make your day easier.</sub></p>
