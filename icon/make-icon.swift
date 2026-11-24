@@ -1,6 +1,7 @@
 // Renders the app icon: a 2x2 grid of tool tiles on a graphite squircle.
-// Usage: swift icon/make-icon.swift <output.iconset>
-// Then:  iconutil -c icns <output.iconset> -o AppIcon.icns
+// Usage: make icon
+// By hand: swift icon/make-icon.swift icon/AppIcon.iconset
+//          iconutil -c icns icon/AppIcon.iconset -o icon/AppIcon.icns
 
 import AppKit
 

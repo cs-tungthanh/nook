@@ -1,0 +1,17 @@
+# gitleaks config used by .githooks/pre-commit.
+# Keeps gitleaks' built-in secret rules and adds a check for absolute home paths.
+title = "nook"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "local-home-path"
+description = "Absolute home directory path (leaks a local username)"
+regex = '''(?:/Users|/home)/([A-Za-z0-9._-]+)/'''
+secretGroup = 1
+keywords = ["/users/", "/home/"]
+
+[rules.allowlist]
+# Placeholders and the shared macOS folder are not anyone's real home.
+regexes = ['''^(?:you|user|username|me|runner|Shared)$''']

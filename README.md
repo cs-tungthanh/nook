@@ -159,13 +159,14 @@ macOS asks for each of these the first time Nook needs it, and **About › Permi
 You need macOS 13 or later, the Swift compiler (Xcode or the Command Line Tools) and, for the command-line tools, Go.
 
 ```bash
-./build.sh          # compile, bundle and sign Nook.app
-./install.sh        # build, replace /Applications/Nook.app and launch it
+make build        # compile, bundle and sign Nook.app
+make install      # build, replace /Applications/Nook.app and launch it
+make hooks        # once per clone: block commits that hold a secret or home path
 ```
 
-`./install.sh --uninstall` quits and removes Nook. Local builds take the latest release's version number, so the update check treats them as current.
+Run `make` to list every target. `make uninstall` quits and removes Nook, and `make run` builds and opens the repo copy. The targets call `scripts/build.sh` and `scripts/install.sh`, which you can also run directly. Local builds take the latest release's version number, so the update check treats them as current.
 
-`build.sh` signs with your Apple Development or Developer ID certificate when you have one, so macOS keeps Nook's permissions across rebuilds; otherwise it signs ad-hoc. Set `NOOK_SIGN_IDENTITY` to choose an identity, or `-` to force ad-hoc.
+`scripts/build.sh` signs with your Apple Development or Developer ID certificate when you have one, so macOS keeps Nook's permissions across rebuilds; otherwise it signs ad-hoc. Set `NOOK_SIGN_IDENTITY` to choose an identity, or `-` to force ad-hoc.
 
 <details>
 <summary><strong>Connect YouTube: set up a Google client ID</strong></summary>
@@ -175,7 +176,7 @@ Listing your own playlists needs a Google OAuth client ID built into Nook. Witho
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable **YouTube Data API v3**.
 2. Set up the OAuth consent screen (External), add the `youtube.readonly` scope, and add your Google account as a test user.
 3. Create an **OAuth client ID** of type **iOS** with bundle ID `com.nook.app`.
-4. Put it in a `.env` file next to `build.sh` (it's gitignored), then run `./install.sh`:
+4. Put it in a `.env` file at the repo root (it's gitignored), then run `make install`:
 
    ```
    NOOK_YOUTUBE_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
@@ -188,14 +189,18 @@ While the Google project is in testing, Google signs you out after 7 days and No
 <details>
 <summary><strong>Command-line tools</strong></summary>
 
+Two standalone Go tools live in `tools/`, separate from the app. Pass their flags through `ARGS`:
+
 ```bash
 # Remove duplicate commands from ~/.zsh_history, keeping the latest of each
 # (multi-line commands stay whole; a backup is saved as .zsh_history.bak)
-go run ./clean-zsh [path/to/history]
+make clean-zsh [ARGS="path/to/history"]
 
 # Preview which Microsoft Edge bookmarks have moved, then save them with -apply
-go run . [-apply] [-wait 3] [-bookmarks path] [-edge path] [-proxy url]
+make bookmarks [ARGS="-apply -wait 3 -bookmarks path -edge path -proxy url"]
 ```
+
+Or run them directly with `cd tools && go run ./clean-zsh` and `go run ./edge-bookmarks`.
 
 Close Edge completely before running the bookmark updater with `-apply`, because Edge can overwrite its bookmarks file when it quits.
 
@@ -230,16 +235,20 @@ Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Scree
 
 | Path | What it is |
 |---|---|
-| `Nook.swift` | The menu bar app (SwiftUI + AppKit) |
+| `Sources/Nook/App/` | The app's entry point, app delegate (menu bar menus) and shared constants |
+| `Sources/Nook/Features/` | One file or folder per feature: Pomodoro, ScreenRecorder, Bluetooth, Music, Permissions, SystemMonitor, Updater, Notifier |
+| `Sources/Nook/UI/` | SwiftUI views: the island, its pages (`ContentView`, one extension per page), shared components, button styles and themes |
+| `Sources/Nook/Support/` | Small helpers used across features |
 | `Info.plist` | App bundle settings |
-| `build.sh` | Compiles, bundles and signs `Nook.app` |
-| `install.sh` | Builds and reinstalls Nook in `/Applications` (`--uninstall` removes it) |
+| `icon/` | App icon and the script that draws it (`make icon`) |
+| `scripts/build.sh` | Compiles, bundles and signs `Nook.app` |
+| `scripts/install.sh` | Builds and reinstalls Nook in `/Applications` (`--uninstall` removes it) |
 | `packaging/homebrew/` | Template for the Homebrew cask |
 | `.github/workflows/release.yml` | Builds a release and updates the Homebrew tap when a `v*` tag is pushed |
-| `icon/` | App icon and the script that draws it (`swift icon/make-icon.swift`) |
+| `.githooks/pre-commit`, `.gitleaks.toml` | Blocks commits that hold a secret or a home path (enable with `git config core.hooksPath .githooks`) |
+| `Makefile` | Entry points for the scripts and tools (run `make` to list them) |
 | `screenshots/` | Images of the island used in this README |
-| `clean-zsh/` | Zsh history cleaner |
-| `main.go` | Edge bookmark updater |
+| `tools/` | Standalone Go tools, not part of the app: `clean-zsh` (Zsh history cleaner) and `edge-bookmarks` (Edge bookmark updater) |
 
 </details>
 

@@ -89,7 +89,6 @@ func main() {
 
 	entries := groupEntries(lines)
 
-	// Record the last occurrence of each command.
 	last := make(map[string]int, len(entries))
 	for i, entry := range entries {
 		last[commandOf(entry)] = i

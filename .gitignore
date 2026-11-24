@@ -11,15 +11,16 @@
 *.swp
 *~
 
-# Swift build output (produced by build.sh)
+# Swift build output (produced by scripts/build.sh)
 Nook.app/
 *.o
 *.dSYM/
 .build/
 
-# Go build output
-/tools
-/clean-zsh/clean-zsh
+# Go build output (binaries from `go build` in tools/)
+/tools/tools
+/tools/clean-zsh/clean-zsh
+/tools/edge-bookmarks/edge-bookmarks
 *.exe
 *.test
 *.out

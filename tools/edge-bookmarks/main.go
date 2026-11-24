@@ -134,7 +134,7 @@ func run() error {
 		return fmt.Errorf("parse bookmarks JSON: %w", err)
 	}
 
-	// Walk the entire roots tree. Bookmark folders can be nested.
+	// Bookmark folders can be nested.
 	var bookmarks []map[string]any
 
 	var walk func(any)
@@ -275,7 +275,6 @@ func run() error {
 		return nil
 	}
 
-	// Create a backup before changing the original file.
 	backupPath := *bookmarksPath + "." +
 		time.Now().Format("20060102-150405") + ".bak"
 
@@ -339,7 +338,7 @@ type bookmarkResult struct {
 	skip   bool
 }
 
-// checkBookmark opens rawURL in a new tab and reports where it ends up.
+// checkBookmark opens oldURL in a new tab and reports where it ends up.
 func checkBookmark(browserCtx context.Context, oldURL string, waitSeconds, timeoutSeconds int) bookmarkResult {
 	if !isHTTPURL(oldURL) {
 		return bookmarkResult{report: "  SKIP: not an HTTP(S) URL\n", skip: true}

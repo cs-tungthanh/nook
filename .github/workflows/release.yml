@@ -44,7 +44,7 @@ jobs:
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" login.keychain
           rm "$RUNNER_TEMP/cert.p12"
-          # Hand build.sh this certificate by its hash. build.sh only looks for
+          # Hand scripts/build.sh this certificate by its hash. build.sh only looks for
           # trusted identities (find-identity -v), and a self-signed certificate
           # isn't trusted on the runner, so it would fall back to ad-hoc.
           IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" \
@@ -56,7 +56,7 @@ jobs:
           echo "NOOK_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build
-        run: NOOK_VERSION="$VERSION" ./build.sh
+        run: NOOK_VERSION="$VERSION" scripts/build.sh
 
       - name: Package
         run: |

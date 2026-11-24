@@ -1,18 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build script for Nook app
+# Build script for Nook app. Works from any directory: paths are relative to the
+# repo root, and Nook.app is written there.
+cd "$(dirname "$0")/.."
 
 echo "Building Nook..."
 
-# Compile the Swift code
+SOURCES=()
+while IFS= read -r file; do SOURCES+=("$file"); done < <(find Sources/Nook -name '*.swift' | sort)
+
+# -wmo optimizes all files as one module, so calls across files are inlined and
+# specialized as if the app were a single file.
 mkdir -p Nook.app/Contents/MacOS
-swiftc -O \
+swiftc -O -wmo \
     -parse-as-library \
     -target arm64-apple-macos13.0 \
     -import-objc-header /dev/null \
     -o Nook.app/Contents/MacOS/Nook \
-    Nook.swift
+    "${SOURCES[@]}"
 
 # Copy Info.plist, stamping the version. Release builds set NOOK_VERSION; a
 # local build takes the latest release tag, so Nook's update check sees it as
@@ -37,19 +43,16 @@ if [ -n "${NOOK_YOUTUBE_CLIENT_ID:-}" ]; then
     /usr/libexec/PlistBuddy -c "Add :NookYouTubeClientID string ${NOOK_YOUTUBE_CLIENT_ID}" Nook.app/Contents/Info.plist
 fi
 
-# Copy the app icon (regenerate with icon/make-icon.swift)
+# Regenerate the icon with `make icon`
 mkdir -p Nook.app/Contents/Resources
 cp icon/AppIcon.icns Nook.app/Contents/Resources/
 
 # Sign the whole bundle so Info.plist is bound and the app gets its bundle
-# identity — UserNotifications silently refuses linker-signed binaries.
-# Prefer a real certificate: privacy grants (Screen Recording, Microphone) are
-# tied to the signature, and an ad-hoc one changes on every build, so macOS
-# would forget the grant after each rebuild. Override with NOOK_SIGN_IDENTITY
-# (use "-" to force ad-hoc).
-# Prefers Developer ID or Apple Development, but any valid code signing
-# identity (Apple Distribution, Mac Developer, a self-signed one) still beats
-# ad-hoc, since its signature stays the same between builds.
+# identity: UserNotifications silently refuses linker-signed binaries.
+# Privacy grants (Screen Recording, Microphone) are tied to the signature, and
+# an ad-hoc one changes every build, so any real certificate beats ad-hoc;
+# Developer ID or Apple Development is tried first. NOOK_SIGN_IDENTITY
+# overrides ("-" forces ad-hoc).
 IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
 SIGN_IDENTITY="${NOOK_SIGN_IDENTITY:-$(printf '%s\n' "$IDENTITIES" \
     | awk '/"Apple Development|"Developer ID Application/ { print $2; exit }')}"

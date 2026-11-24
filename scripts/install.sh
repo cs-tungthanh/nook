@@ -4,14 +4,14 @@ set -euo pipefail
 # Builds Nook, removes any installed copy, installs the new one to
 # /Applications and launches it.
 #
-#   ./install.sh            build, reinstall and launch
-#   ./install.sh --uninstall quit and remove Nook only
+#   scripts/install.sh             build, reinstall and launch
+#   scripts/install.sh --uninstall quit and remove Nook only
 
 APP_NAME="Nook"
 BUNDLE_ID="com.nook.app"
 INSTALL_PATH="/Applications/${APP_NAME}.app"
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 quit_running_app() {
     if pgrep -x "$APP_NAME" >/dev/null; then
@@ -46,7 +46,7 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
-./build.sh
+scripts/build.sh
 
 quit_running_app
 remove_installed_app
@@ -63,5 +63,5 @@ if codesign -dv "$INSTALL_PATH" 2>&1 | grep -q "Signature=adhoc"; then
     echo "This build is ad-hoc signed, so macOS forgets its Screen Recording and"
     echo "Microphone permissions on every update. Remove Nook under System Settings ›"
     echo "Privacy & Security › Screen & System Audio Recording, allow it again, and"
-    echo "relaunch Nook. A signing certificate (see build.sh) avoids this."
+    echo "relaunch Nook. A signing certificate (see scripts/build.sh) avoids this."
 fi

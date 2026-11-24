@@ -1,0 +1,10 @@
+#!/bin/sh
+# Blocks a commit whose staged changes hold a secret, a home path or a private term.
+# Enable once per clone: git config core.hooksPath .githooks
+command -v gitleaks >/dev/null 2>&1 || { echo "pre-commit: gitleaks not installed (brew install gitleaks); skipping"; exit 0; }
+gitleaks git --pre-commit --staged --redact --no-banner --config .gitleaks.toml || exit 1
+# Private terms (names that must never reach the public repo) live in .git/, so the list itself is never committed.
+private="$(git rev-parse --git-dir)/gitleaks-private.toml"
+if [ -f "$private" ]; then
+  gitleaks git --pre-commit --staged --redact --no-banner --config "$private" || exit 1
+fi
