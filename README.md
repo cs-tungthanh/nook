@@ -211,13 +211,15 @@ The updater checks links in a fresh, signed-out Edge profile, so it doesn't use 
 <details>
 <summary><strong>Releasing</strong></summary>
 
-Push a version tag:
+Check that [CI](.github/workflows/ci.yml) passed on `main`. It builds the app, checks the Go tools and scans for secrets on every push and pull request. Then push a version tag:
 
 ```bash
 git tag -a v1.2.0 -m "Nook 1.2.0" && git push origin v1.2.0
 ```
 
 The [Release workflow](.github/workflows/release.yml) builds Nook with that version, attaches `Nook-1.2.0.zip` to a GitHub release, and updates `Casks/nook.rb` in [cs-tungthanh/homebrew-tap](https://github.com/cs-tungthanh/homebrew-tap) from the template in `packaging/homebrew/nook.rb`. Installed copies of Nook then offer the update.
+
+Tags must look like `v1.2.0`; anything else fails before building. If a release fails partway, re-run it: an existing release gets its zip replaced, and an unchanged cask is left alone.
 
 | Secret | Required | What it is |
 |---|---|---|
@@ -244,6 +246,7 @@ Without a certificate, releases are signed ad-hoc and macOS forgets Nook's Scree
 | `scripts/build.sh` | Compiles, bundles and signs `Nook.app` |
 | `scripts/install.sh` | Builds and reinstalls Nook in `/Applications` (`--uninstall` removes it) |
 | `packaging/homebrew/` | Template for the Homebrew cask |
+| `.github/workflows/ci.yml` | Builds the app, checks the Go tools and scans for secrets on every push to `main` and every pull request |
 | `.github/workflows/release.yml` | Builds a release and updates the Homebrew tap when a `v*` tag is pushed |
 | `.githooks/pre-commit`, `.gitleaks.toml` | Blocks commits that hold a secret or a home path (enable with `git config core.hooksPath .githooks`) |
 | `Makefile` | Entry points for the scripts and tools (run `make` to list them) |
